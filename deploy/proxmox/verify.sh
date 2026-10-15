@@ -67,6 +67,9 @@ section "Jellyfin only accepts the Gate"
 code=$(in_jf curl -s -o /dev/null -w '%{http_code}' localhost:8096/System/Info/Public)
 [ "$code" = 403 ] && pass "Unsigned request inside Jellyfin's container: 403" ||
   fail "Unsigned request inside Jellyfin's container got $code, expected 403 (plugin not enforcing: key missing or plugin disabled)"
+code=$(in_jf curl -s -o /dev/null -w '%{http_code}' localhost:8096/web/index.html)
+[ "$code" = 403 ] && pass "Unsigned request for the web client (/web): 403" ||
+  fail "Unsigned request for /web/index.html got $code, expected 403 (another plugin serving /web runs before the Lanternfish check; update the Lanternfish plugin to 0.1.2+)"
 code=$(in_jf curl -s -o /dev/null -w '%{http_code}' \
   -H 'X-Lanternfish-Gate-Timestamp: 1' -H 'X-Lanternfish-Gate-Nonce: x' \
   -H 'X-Lanternfish-Device: dev_x' -H 'X-Lanternfish-Gate-Signature: AAAA' \

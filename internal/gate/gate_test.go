@@ -230,8 +230,8 @@ func TestBrowserFlowAndProxy(t *testing.T) {
 	if got := up.Header.Get("Cookie"); strings.Contains(got, "lf_session") || !strings.Contains(got, "jellyfin=keep") {
 		t.Errorf("upstream cookie = %q", got)
 	}
-	if rec.Header().Get("Strict-Transport-Security") == "" {
-		t.Error("missing HSTS")
+	if got := rec.Header().Values("Strict-Transport-Security"); len(got) != 1 {
+		t.Errorf("HSTS header sent %d times: %q", len(got), got)
 	}
 
 	// Header token works too and is stripped.
