@@ -151,7 +151,7 @@ func serve() error {
 	if err != nil {
 		return fmt.Errorf("load TLS certificate: %w", err)
 	}
-	unlock, err := gate.LockFile(cfg.DataPath, true)
+	unlock, err := gate.LockFile(cfg.DataPath)
 	if err != nil {
 		return err
 	}
@@ -224,7 +224,7 @@ func openOffline() (*gate.Admin, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	unlock, err := gate.LockFile(cfg.DataPath, false)
+	unlock, err := gate.LockFile(cfg.DataPath)
 	if err != nil {
 		return nil, nil, err
 	}

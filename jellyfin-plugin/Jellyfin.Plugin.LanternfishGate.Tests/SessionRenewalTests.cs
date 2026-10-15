@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -106,6 +107,32 @@ public sealed class SessionRenewalTests : IDisposable
             Assert.Equal(Index, body);
             Assert.False(resp.Headers.Contains(SessionRenewal.MarkerHeader));
         }
+    }
+
+    // A page too big to change is streamed through as written, not held in
+    // memory in full first.
+    [Fact]
+    public async Task PassesLargePagesThroughWithoutBufferingThem()
+    {
+        var page = "<html><head></head><body>" + new string('x', 8 << 20) + "</body></html>";
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Method = "GET";
+        using var output = new MemoryStream();
+        ctx.Response.Body = output;
+        long largestHeld = 0;
+        await SessionRenewal.InjectAsync(ctx, async c =>
+        {
+            c.Response.ContentType = "text/html";
+            var bytes = System.Text.Encoding.UTF8.GetBytes(page);
+            for (var i = 0; i < bytes.Length; i += 1 << 20)
+            {
+                await c.Response.Body.WriteAsync(bytes.AsMemory(i, Math.Min(1 << 20, bytes.Length - i)));
+                largestHeld = Math.Max(largestHeld, (i + (1 << 20)) - output.Length);
+            }
+        });
+        Assert.Equal(page, System.Text.Encoding.UTF8.GetString(output.ToArray()));
+        Assert.True(largestHeld <= 4 << 20, $"held {largestHeld} bytes before writing through");
+        Assert.False(ctx.Response.Headers.ContainsKey(SessionRenewal.MarkerHeader));
     }
 
     private static int CountOf(string haystack, string needle)

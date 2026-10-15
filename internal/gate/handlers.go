@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -25,7 +26,17 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func readJSON(w http.ResponseWriter, r *http.Request, v any) error {
+// readJSON reads a small JSON request body.
+//
+// SECURITY: the body is bounded in time as well as size. The server has no
+// overall read timeout (uploads and streams run long), so without this a
+// client could send headers, trickle or stall the body, and hold a handler
+// and connection open indefinitely without ever counting as a failure.
+func (g *Gate) readJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	rc := http.NewResponseController(w)
+	if err := rc.SetReadDeadline(time.Now().Add(g.cfg.BodyReadTimeout)); err == nil {
+		defer rc.SetReadDeadline(time.Time{})
+	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
@@ -102,7 +113,7 @@ func (g *Gate) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req enrollRequest
-	if err := readJSON(w, r, &req); err != nil {
+	if err := g.readJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "malformed request")
 		return
 	}
@@ -219,7 +230,7 @@ func (g *Gate) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DeviceID string `json:"device_id"`
 	}
-	if err := readJSON(w, r, &req); err != nil || req.DeviceID == "" || len(req.DeviceID) > 64 {
+	if err := g.readJSON(w, r, &req); err != nil || req.DeviceID == "" || len(req.DeviceID) > 64 {
 		writeError(w, http.StatusBadRequest, "malformed request")
 		return
 	}
@@ -242,7 +253,7 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 		Challenge string `json:"challenge"`
 		Signature string `json:"signature"`
 	}
-	if err := readJSON(w, r, &req); err != nil {
+	if err := g.readJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "malformed request")
 		return
 	}
@@ -260,13 +271,7 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token, exp := g.sessions.create(dev.ID, now, g.cfg.SessionTTL)
-	g.store.Update(func(d *storeData) error {
-		if stored, ok := d.Devices[dev.ID]; ok {
-			stored.LastAuthAt = &now
-		}
-		d.pruneTickets(now)
-		return nil
-	})
+	g.noteAuth(dev, now)
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
@@ -343,7 +348,7 @@ func (g *Gate) handleCreateTicket(w http.ResponseWriter, r *http.Request, key *A
 		Label      string `json:"label"`
 		TTLSeconds int    `json:"ttl_seconds"`
 	}
-	if err := readJSON(w, r, &req); err != nil {
+	if err := g.readJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "malformed request")
 		return
 	}
@@ -436,14 +441,23 @@ type deviceView struct {
 	EnrolledFrom string     `json:"enrolled_from"`
 	LastAuthAt   *time.Time `json:"last_auth_at,omitempty"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+	// RevocationUnsaved: revoked and locked out now, but the revocation
+	// could not be saved and would be lost on restart. Revoke again.
+	RevocationUnsaved bool `json:"revocation_unsaved,omitempty"`
 }
 
 func (g *Gate) handleListDevices(w http.ResponseWriter, r *http.Request, _ *AdminKey) {
 	out := []deviceView{}
 	g.store.View(func(d *storeData) {
 		for _, dev := range d.Devices {
-			out = append(out, deviceView{dev.ID, dev.Name, dev.Platform, dev.Kind, dev.CreatedAt,
-				dev.EnrolledFrom, dev.LastAuthAt, dev.RevokedAt})
+			v := deviceView{dev.ID, dev.Name, dev.Platform, dev.Kind, dev.CreatedAt,
+				dev.EnrolledFrom, dev.LastAuthAt, dev.RevokedAt, false}
+			if t, ok := g.lastAuth.Load(dev.ID); ok && (v.LastAuthAt == nil || t.(time.Time).After(*v.LastAuthAt)) {
+				lt := t.(time.Time)
+				v.LastAuthAt = &lt
+			}
+			_, v.RevocationUnsaved = g.unsavedRevocations.Load(dev.ID)
+			out = append(out, v)
 		}
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
@@ -455,6 +469,10 @@ func (g *Gate) handleRevokeDevice(w http.ResponseWriter, r *http.Request, key *A
 	now := g.cfg.Now()
 	var name, platform string
 	errMissing := errors.New("missing")
+	// SECURITY: fail closed. Lock the device out before saving, and keep it
+	// locked out (sessions dropped, streams closed) even if the save fails,
+	// rather than leaving it working until someone notices the error.
+	g.unsavedRevocations.Store(id, struct{}{})
 	err := g.store.Update(func(d *storeData) error {
 		dev, ok := d.Devices[id]
 		if !ok {
@@ -467,14 +485,21 @@ func (g *Gate) handleRevokeDevice(w http.ResponseWriter, r *http.Request, key *A
 		return nil
 	})
 	if errors.Is(err, errMissing) {
+		g.unsavedRevocations.Delete(id)
 		writeError(w, http.StatusNotFound, "no such device")
-		return
-	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not save")
 		return
 	}
 	g.sessions.removeDevice(id)
 	g.streams.cancelDevice(id)
+	if err != nil {
+		log.Printf("revoke %s: could not save: %v", id, err)
+		g.audit.write(now, "revoke_not_saved", map[string]any{"device_id": id, "admin_key": key.Name,
+			"ip": clientIP(r), "error": err.Error()})
+		writeError(w, http.StatusInternalServerError,
+			"device locked out until restart, but the revocation could not be saved; fix the data file and revoke again")
+		return
+	}
+	g.unsavedRevocations.Delete(id)
 	g.audit.write(now, "revoked", map[string]any{"device_id": id, "name": name, "admin_key": key.Name, "ip": clientIP(r)})
 	g.alerts.send(fmt.Sprintf("🔒 Device revoked on Lanternfish Gate: %q (%s, %s)", name, platform, id))
 	w.WriteHeader(http.StatusNoContent)

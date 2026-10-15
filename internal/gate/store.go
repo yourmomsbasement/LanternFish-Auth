@@ -63,9 +63,16 @@ type storeData struct {
 
 // Store is the Gate's data file. It holds no usable secrets in the clear:
 // public keys, hashes, and values sealed under the master key.
+//
+// SECURITY: updates are transactional. Update works on a copy and publishes
+// it only once it is saved, so a failed save leaves memory and disk agreeing
+// (a half-applied revocation used to look done in memory but not on disk).
+// Readers never wait for disk I/O: writers are serialised by wmu, and mu is
+// held only to take a copy or swap in the new state.
 type Store struct {
 	path string
-	mu   sync.Mutex
+	wmu  sync.Mutex   // serialises writers
+	mu   sync.RWMutex // guards data
 	data storeData
 }
 
@@ -125,30 +132,66 @@ func (s *Store) init() {
 	}
 }
 
-// View runs fn with the store locked for reading.
+// View runs fn with the store locked for reading. fn must not modify d or
+// keep pointers into it.
 func (s *Store) View(fn func(d *storeData)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	fn(&s.data)
 }
 
-// Update runs fn with the store locked and saves the result if fn succeeds.
+// Update runs fn on a copy of the data and, if fn succeeds, saves the copy
+// and makes it current. If fn or the save fails, nothing changes.
 func (s *Store) Update(fn func(d *storeData) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := fn(&s.data); err != nil {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	s.mu.RLock()
+	next := s.data.clone()
+	s.mu.RUnlock()
+	if err := fn(&next); err != nil {
 		return err
 	}
-	return s.save()
+	if err := writeStore(s.path, &next); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.data = next
+	s.mu.Unlock()
+	return nil
 }
 
-// save writes the file atomically with owner-only permissions.
-func (s *Store) save() error {
-	raw, err := json.MarshalIndent(&s.data, "", "  ")
+// clone copies the maps and the records in them. Records are replaced, never
+// changed in place through shared pointers (time and byte fields are only
+// ever reassigned), so copying each struct is enough.
+func (d *storeData) clone() storeData {
+	c := *d
+	c.Devices = make(map[string]*Device, len(d.Devices))
+	for k, v := range d.Devices {
+		x := *v
+		c.Devices[k] = &x
+	}
+	c.Tickets = make(map[string]*Ticket, len(d.Tickets))
+	for k, v := range d.Tickets {
+		x := *v
+		c.Tickets[k] = &x
+	}
+	c.AdminKeys = make(map[string]*AdminKey, len(d.AdminKeys))
+	for k, v := range d.AdminKeys {
+		x := *v
+		c.AdminKeys[k] = &x
+	}
+	return c
+}
+
+func (s *Store) save() error { return writeStore(s.path, &s.data) }
+
+// writeStore writes the file atomically with owner-only permissions.
+func writeStore(path string, data *storeData) error {
+	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".gate-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".gate-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -168,7 +211,7 @@ func (s *Store) save() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), s.path)
+	return os.Rename(tmp.Name(), path)
 }
 
 func (d *storeData) ticketByHash(hash string) *Ticket {
@@ -197,27 +240,31 @@ func (d *storeData) pruneTickets(now time.Time) {
 	}
 }
 
-// LockFile marks the data file as in use, so offline CLI commands don't race
-// a running Gate. With takeOver, an existing lock (left by a crash) is
-// replaced instead of refused; the server uses this so it can always restart.
-// It returns a release function.
-func LockFile(dataPath string, takeOver bool) (func(), error) {
+// LockFile takes an exclusive lock on the data file for as long as the
+// process runs, so two Gates, or a Gate and an offline CLI command, can't
+// overwrite each other's changes. It returns a release function.
+//
+// SECURITY: the lock is held by the operating system (flock on Unix, an
+// unshared handle on Windows), so a crashed process releases it and no
+// process can take over or remove a lock another one holds. The lock file
+// itself is left in place: deleting it would let a second process lock a new
+// file while the first still holds the old one.
+func LockFile(dataPath string) (func(), error) {
 	lock := dataPath + ".lock"
 	if err := os.MkdirAll(filepath.Dir(dataPath), 0o700); err != nil {
 		return nil, err
 	}
-	flags := os.O_CREATE | os.O_EXCL | os.O_WRONLY
-	if takeOver {
-		flags = os.O_CREATE | os.O_TRUNC | os.O_WRONLY
+	f, err := lockExclusive(lock)
+	if errors.Is(err, errLocked) {
+		return nil, fmt.Errorf("%s is locked: another lanternfish-gate is using this data file (stop the service before running this command)", lock)
 	}
-	f, err := os.OpenFile(lock, flags, 0o600)
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("%s exists: stop lanternfish-gate before running this command (delete the lock file if it crashed)", lock)
-		}
 		return nil, err
 	}
-	fmt.Fprintf(f, "%d\n", os.Getpid())
-	f.Close()
-	return func() { os.Remove(lock) }, nil
+	if err := f.Truncate(0); err == nil {
+		fmt.Fprintf(f, "%d\n", os.Getpid())
+	}
+	return func() { f.Close() }, nil
 }
+
+var errLocked = errors.New("lock held by another process")

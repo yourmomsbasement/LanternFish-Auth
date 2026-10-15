@@ -1,4 +1,4 @@
-# Security review, October 2026
+# Security reviews, October 2026
 
 Scope: the Gate (`internal/gate`, `cmd/lanternfish-gate`), its web client, the
 Jellyfin plugin, and the deploy files. Fixed issues are marked `SECURITY:` in
@@ -16,6 +16,27 @@ the code.
 | 6 | Low | Gate | **Alert mention injection.** Device names come from whoever enrolls. A name such as `@everyone` pinged the whole Discord server. | Webhook posts set `allowed_mentions: {"parse": []}`. |
 | 7 | Low | Gate | **Log injection.** The proxy error log printed the client-controlled path raw. A path with an encoded newline could forge log lines. | The path is logged with `%q`. |
 | 8 | Info | Docker | **Admin API exposure through Docker.** The admin API's default allow list includes `172.16.0.0/12`. Docker's userland proxy can make outside clients appear to come from the bridge gateway, which is in that range. An admin key is still required. | `docker-compose.yml` now says to set `LANTERNFISH_ADMIN_ALLOW` to the Builder's address. |
+
+## Follow-up review: resource limits and state integrity
+
+A second review (of `368827d`) found eight more issues. None was an
+authentication bypass. All are fixed, each with a regression test.
+
+| # | Priority | Component | Issue | Fix |
+|---|---|---|---|---|
+| F1 | Medium | Gate | Small JSON bodies had no read deadline, so an unauthenticated client could hold a handler open by stalling its body. | Bodies to the Gate's own endpoints must arrive within 10 s (`BodyReadTimeout`). Media requests are not affected. |
+| F2 | Medium | Gate | The failure limiter keyed IPv6 by full address, so a /64 gave unlimited budgets. Its table had no real cap, and once past 10,000 entries every failure scanned the whole table. | Keyed by source like challenges (IPv4 address or IPv6 /64). Capped at 10,000 sources, and swept at most once a minute. |
+| F3 | Medium | Gate | Every session renewal rewrote and synced the whole data file under the lock that every proxied request's device lookup waits on. | Last sign-in times are kept in memory and saved only when the stored one is over 15 minutes old. Readers no longer wait on disk I/O (see F5). |
+| F4 | Medium | Gate, web client | Sessions per device were unlimited, and each new one scanned all sessions. | At most 16 sessions per device; a new one replaces the oldest. Expired sessions are swept once a minute. The web client runs one renewal at a time. |
+| F5 | Medium | Gate | A failed save left memory changed but the disk not. A failed revocation returned 500 with the device revoked in memory, its streams still open, and the device active on disk. | Store updates are transactional: they work on a copy and publish it only after it is saved. A revocation that can't be saved fails closed: the device is locked out and its connections are closed until restart, the device list flags `revocation_unsaved`, and revoking again saves it. |
+| F6 | Medium | Gate | `serve` took over any existing lock file, and on exit removed it even when another process held it, so two Gates could overwrite each other's data. | An OS-held exclusive lock (flock / unshared handle) for the whole process lifetime. It is released on crash, and no process can take over or remove another's lock. |
+| F7 | Low | Plugin | The nonce limit only triggered cleanup. At the limit, every request scanned the whole cache, and `Count` took every lock. | A real cap. When the cache is full of live nonces, requests get `503` rather than live nonces being evicted. Cleanup runs one at a time, at most once a second while full. The count is kept separately. |
+| F8 | Low | Plugin | Renewal injection buffered the whole response before checking the 4 MiB limit. | Buffers up to 4 MiB, then streams the rest through unchanged. |
+
+Not done: a global request budget for unauthenticated endpoints. A single
+flood could use it up and lock every device out, which would make it a
+lockout tool rather than a defence. Many separate sources stay out of scope,
+as SECURITY.md says.
 
 ## Reviewed, no change needed
 
