@@ -14,7 +14,12 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
         serviceCollection.AddSingleton<Func<GatePolicy?>>(() => Plugin.Instance?.Policy);
-        serviceCollection.AddTransient<IStartupFilter, GateStartupFilter>();
+
+        // Startup filters wrap each other in registration order, the first
+        // outermost. Plugins register in load order, so another plugin's
+        // filter (one serving /web, say) would otherwise run before the
+        // signature check. Going first makes the check cover everything.
+        serviceCollection.Insert(0, ServiceDescriptor.Transient<IStartupFilter, GateStartupFilter>());
     }
 
     private sealed class GateStartupFilter : IStartupFilter
