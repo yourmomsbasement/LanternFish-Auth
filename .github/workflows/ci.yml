@@ -46,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck deploy/systemd/*.sh deploy/systemd/lanternfish-gatectl
+        run: shellcheck deploy/systemd/*.sh deploy/systemd/lanternfish-gatectl deploy/proxmox/verify.sh
       - name: systemd unit
         run: |
           sudo touch /usr/local/bin/lanternfish-gate && sudo chmod +x /usr/local/bin/lanternfish-gate
