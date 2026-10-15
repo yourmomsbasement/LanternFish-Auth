@@ -48,13 +48,17 @@ type AdminKey struct {
 }
 
 type storeData struct {
-	Version     int                  `json:"version"`
-	KeyCheck    string               `json:"key_check"`
-	CACertPEM   string               `json:"ca_cert_pem"`
-	CAKeySealed string               `json:"ca_key_sealed"`
-	Devices     map[string]*Device   `json:"devices"`
-	Tickets     map[string]*Ticket   `json:"tickets"`
-	AdminKeys   map[string]*AdminKey `json:"admin_keys"`
+	Version     int    `json:"version"`
+	KeyCheck    string `json:"key_check"`
+	CACertPEM   string `json:"ca_cert_pem"`
+	CAKeySealed string `json:"ca_key_sealed"`
+	// Key the Gate signs forwarded requests with; Jellyfin's Lanternfish
+	// plugin holds only the public half.
+	UpstreamPublicKey []byte               `json:"upstream_public_key,omitempty"`
+	UpstreamKeySealed string               `json:"upstream_key_sealed,omitempty"`
+	Devices           map[string]*Device   `json:"devices"`
+	Tickets           map[string]*Ticket   `json:"tickets"`
+	AdminKeys         map[string]*AdminKey `json:"admin_keys"`
 }
 
 // Store is the Gate's data file. It holds no usable secrets in the clear:

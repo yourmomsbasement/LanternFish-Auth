@@ -157,6 +157,10 @@ Before forwarding, the Gate removes `lf_session` and `X-Lanternfish-Session`
 from the request, and replaces any incoming `X-Lanternfish-Device` header with
 the authenticated device ID.
 
+The Gate then **signs** the forwarded request (see *Signed requests to
+Jellyfin* below), so Jellyfin can refuse anything that did not come through
+the Gate.
+
 Unauthenticated requests receive `401 {"error": "lanternfish_auth_required"}`.
 The exception is a browser page navigation (a `GET` whose `Accept` includes
 `text/html`). That is redirected to the Gate's sign-in page at
@@ -172,6 +176,59 @@ Revocation is permanent. It drops the device's sessions immediately, and its
 client certificate is refused from the next request on, because the Gate
 looks up every certificate in its device list rather than trusting the
 certificate's validity period.
+
+## Signed requests to Jellyfin
+
+Network isolation is the first lock on the Gate→Jellyfin link. The
+Lanternfish Jellyfin plugin (`jellyfin-plugin/`) is the second: it refuses
+every request that does not carry a valid Gate signature, so a misconfigured
+port or a forgotten Docker `ports:` line doesn't open Jellyfin to the network.
+
+On first start, the Gate creates an ECDSA P-256 **upstream signing key**,
+sealed under the master key. `lanternfish-gate upstream-key` prints its public
+half (base64 SPKI), which goes into the plugin's settings. Jellyfin holds only
+that public key, so a Jellyfin backup or compromise can't be used to forge
+Gate traffic.
+
+Every forwarded request carries:
+
+| Header | Value |
+|---|---|
+| `X-Lanternfish-Gate-Timestamp` | Unix seconds |
+| `X-Lanternfish-Gate-Nonce` | 32 random bytes, base64url |
+| `X-Lanternfish-Device` | authenticated device ID |
+| `X-Lanternfish-Gate-Signature` | base64 raw `r‖s` ECDSA-P256-SHA256 over the message below |
+
+```
+"lanternfish-gate/v1/upstream\n" + METHOD + "\n" + target + "\n" + timestamp + "\n" + nonce + "\n" + device_id
+```
+
+`target` is the request target exactly as sent on the wire: the escaped path
+plus `?query`. The plugin reads it from ASP.NET Core's `RawTarget`.
+
+The plugin accepts a request only when:
+
+* the signature verifies against one of its configured keys (listing more
+  than one key allows rotation);
+* the timestamp is within ±30 seconds (configurable) of Jellyfin's clock, so
+  keep both machines on NTP;
+* the nonce has not been seen before. Nonces are remembered until their
+  timestamp falls out of the window.
+
+The request body is not signed, because streaming uploads can't be buffered.
+The signature binds the method, target, device and time, and the nonce makes
+each request single-use.
+
+Exceptions and failure modes:
+
+* Unsigned `GET`/`HEAD` requests to `/health` from loopback are allowed by
+  default, for Docker health checks. This can be turned off.
+* **No key configured: the plugin does not enforce.** It logs a warning, so
+  installing the plugin can't lock you out before the key is pasted in.
+* **Unparseable key: the plugin refuses everything** (`503`). A typo must not
+  open the server.
+* Rejections get `403` and are logged at most once every 30 seconds, with a
+  running count.
 
 ## Admin API
 
@@ -211,7 +268,8 @@ admin password.
   first renewal that rotates the key.
 * **Jellyfin must not be reachable except through the Gate.** Bind it to
   `127.0.0.1` or to a Docker network with no published ports. A gate that can
-  be routed around protects nothing. See `deploy/docker-compose.yml`.
+  be routed around protects nothing. See `deploy/docker-compose.yml`. The
+  Jellyfin plugin backs this up by refusing unsigned requests.
 
 ## Secrets at rest
 
@@ -219,6 +277,7 @@ admin password.
 |---|---|
 | Master key (32 bytes) | `LANTERNFISH_MASTER_KEY`, `LANTERNFISH_MASTER_KEY_FILE` (Docker secret), or `LANTERNFISH_MASTER_KEY_DPAPI_FILE` (Windows DPAPI). Never the data file. |
 | Device CA private key | Data file, sealed with the master key |
+| Upstream signing key | Data file, sealed with the master key (Jellyfin holds only the public half) |
 | Roku secrets | Data file, sealed with the master key, with the device ID as associated data |
 | Tickets, admin keys | Data file, SHA-256 hashes only |
 | Device public keys | Data file, in plain form (not secret) |

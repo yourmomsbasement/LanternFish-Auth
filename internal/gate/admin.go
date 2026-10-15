@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"crypto/x509"
 	"errors"
 	"sort"
 )
@@ -78,4 +79,22 @@ func (a *Admin) DeviceCACertPEM() []byte {
 	var out []byte
 	a.store.View(func(d *storeData) { out = []byte(d.CACertPEM) })
 	return out
+}
+
+// UpstreamPublicKey returns the base64 key for the Jellyfin plugin, creating
+// the signing key if this data file does not have one yet.
+func (a *Admin) UpstreamPublicKey() (string, error) {
+	sealer, err := NewSealer(a.cfg.MasterKey)
+	if err != nil {
+		return "", err
+	}
+	key, err := loadUpstreamKey(a.store, sealer)
+	if err != nil {
+		return "", err
+	}
+	pub, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		return "", err
+	}
+	return encodeB64(pub), nil
 }

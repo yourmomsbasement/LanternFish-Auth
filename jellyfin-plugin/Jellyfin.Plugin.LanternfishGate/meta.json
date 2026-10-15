@@ -1,0 +1,15 @@
+{
+  "category": "Security",
+  "changelog": "Initial release.",
+  "description": "Rejects every request that was not forwarded and signed by Lanternfish Gate.",
+  "guid": "2ffdcd88-4b14-41c3-b3af-a2bdffb9506c",
+  "name": "Lanternfish Gate",
+  "overview": "Only accept traffic signed by Lanternfish Gate",
+  "owner": "lanternfish",
+  "targetAbi": "12.2.0.0",
+  "timestamp": "2026-10-15T00:00:00.0000000Z",
+  "version": "1.0.0.0",
+  "status": "Active",
+  "autoUpdate": false,
+  "assemblies": []
+}

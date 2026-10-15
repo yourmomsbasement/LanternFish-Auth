@@ -28,8 +28,9 @@ const usage = `Usage:
   lanternfish-gate admin-key list
   lanternfish-gate admin-key revoke ID
   lanternfish-gate device-ca                 Print the device CA certificate
+  lanternfish-gate upstream-key              Print the key for Jellyfin's Lanternfish plugin
 
-admin-key and device-ca edit the data file directly; stop the Gate first.
+admin-key, device-ca and upstream-key read the data file directly; stop the Gate first.
 
 Environment:
   LANTERNFISH_LISTEN             listen address (default :8443)
@@ -62,6 +63,8 @@ func main() {
 		err = adminKey(args[1:])
 	case "device-ca":
 		err = deviceCA()
+	case "upstream-key":
+		err = upstreamKey()
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -153,6 +156,7 @@ func serve() error {
 		srv.Shutdown(shutdown)
 	}()
 	log.Printf("listening on %s, proxying to %s", srv.Addr, cfg.Upstream)
+	log.Printf("requests to Jellyfin are signed; Lanternfish plugin key: %s", g.UpstreamPublicKey())
 	if err := srv.ListenAndServeTLS("", ""); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -256,5 +260,19 @@ func deviceCA() error {
 	}
 	defer unlock()
 	os.Stdout.Write(a.DeviceCACertPEM())
+	return nil
+}
+
+func upstreamKey() error {
+	a, unlock, err := openOffline()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	key, err := a.UpstreamPublicKey()
+	if err != nil {
+		return err
+	}
+	fmt.Println(key)
 	return nil
 }

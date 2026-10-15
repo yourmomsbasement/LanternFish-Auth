@@ -2,6 +2,8 @@
 #
 # The important part: Jellyfin publishes NO ports. The only way in from the
 # network is through the Gate. A gate that can be routed around protects nothing.
+# As a second lock, install the Lanternfish Gate Jellyfin plugin
+# (jellyfin-plugin/README.md) so Jellyfin itself refuses unsigned requests.
 #
 # Before the first start:
 #   mkdir -p secrets

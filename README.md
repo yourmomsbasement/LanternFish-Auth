@@ -14,6 +14,9 @@ device and never leaves it.
   kept outside the data file.
 * **Builds are not credentials.** A package carries only the server URL, a key
   pin and a one-time enrollment ticket that expires within hours.
+* **A Jellyfin plugin** ([jellyfin-plugin/](jellyfin-plugin/)) that refuses
+  any request the Gate didn't sign, so Jellyfin stays shut even if its port
+  is accidentally exposed.
 * Admin API for Lanternfish Builder, with its own revocable key, one-call
   revocation, an audit log, rate limiting and enrollment alerts (Discord
   webhook).
@@ -63,6 +66,19 @@ server certificate when the file changes, so renewals need no restart. If you
 already run a reverse proxy on port 443, forward raw TCP (TLS passthrough) to
 the Gate rather than terminating TLS in front of it.
 
+### Locking Jellyfin to the Gate
+
+Install the Lanternfish Gate plugin in Jellyfin (see
+[jellyfin-plugin/README.md](jellyfin-plugin/README.md)), then paste the
+Gate's key into its settings:
+
+```sh
+lanternfish-gate upstream-key        # also printed in the Gate's log at startup
+```
+
+From then on, Jellyfin answers `403` to anything that didn't come through the
+Gate, including requests made straight to port 8096.
+
 ### Enrolling a browser
 
 ```sh
@@ -80,7 +96,8 @@ session renews before it expires.
 ## Hardening checklist
 
 * Jellyfin must not be reachable except through the Gate. Bind it to
-  `127.0.0.1` or a Docker network with no published ports.
+  `127.0.0.1` or a Docker network with no published ports, and install the
+  Jellyfin plugin as a second lock.
 * Keep the master key out of the data file and out of backups of it.
 * Set `LANTERNFISH_ALERT_WEBHOOK` so every enrollment and revocation pings you.
 * Pin your own CA, or two keys, in the clients. Never pin only the leaf
@@ -91,7 +108,10 @@ session renews before it expires.
 ## Development
 
 ```sh
-go test -race ./...
+go test -race ./...                                       # Gate
+dotnet test jellyfin-plugin/Jellyfin.Plugin.LanternfishGate.sln   # plugin
 ```
 
-Only the Go standard library is used.
+The Gate uses only the Go standard library. Both test suites check
+`testdata/upstream-vector.json`, a request signed by the Gate, so the two
+sides can't drift apart.

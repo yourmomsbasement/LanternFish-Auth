@@ -3,6 +3,7 @@
 package gate
 
 import (
+	"crypto/ecdsa"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
@@ -82,6 +83,7 @@ type Gate struct {
 	store      *Store
 	sealer     *Sealer
 	ca         *deviceCA
+	upstream   *ecdsa.PrivateKey
 	audit      *auditLog
 	alerts     *alerter
 	limiter    *failureLimiter
@@ -117,6 +119,10 @@ func New(cfg Config) (*Gate, error) {
 	if caErr != nil {
 		return nil, caErr
 	}
+	upstreamKey, err := loadUpstreamKey(store, sealer)
+	if err != nil {
+		return nil, err
+	}
 	audit, err := openAuditLog(cfg.AuditPath)
 	if err != nil {
 		return nil, err
@@ -126,6 +132,7 @@ func New(cfg Config) (*Gate, error) {
 		store:      store,
 		sealer:     sealer,
 		ca:         ca,
+		upstream:   upstreamKey,
 		audit:      audit,
 		alerts:     &alerter{url: cfg.AlertWebhook, client: &http.Client{Timeout: 10 * time.Second}},
 		limiter:    newFailureLimiter(cfg.FailureLimit, cfg.FailureWindow),
@@ -136,6 +143,7 @@ func New(cfg Config) (*Gate, error) {
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(cfg.Upstream)
 			pr.SetXForwarded()
+			g.signUpstream(pr.Out)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			resp.Header.Set("Strict-Transport-Security", hstsValue)
