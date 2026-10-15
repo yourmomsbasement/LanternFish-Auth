@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lanternfish Gate</title>
+<link rel="stylesheet" href="/_lanternfish/style.css">
+</head>
+<body>
+<main>
+  <h1>Lanternfish Gate</h1>
+  <p id="status" role="status">Checking this browser…</p>
+  <form id="enroll" hidden>
+    <label for="ticket">Enrollment ticket</label>
+    <input id="ticket" name="ticket" autocomplete="off" spellcheck="false" required placeholder="lft_…">
+    <label for="name">Device name</label>
+    <input id="name" name="name" autocomplete="off" maxlength="64" placeholder="e.g. Office laptop">
+    <button type="submit">Enroll this browser</button>
+  </form>
+</main>
+<script src="/_lanternfish/gate-client.js"></script>
+<script src="/_lanternfish/login.js"></script>
+</body>
+</html>

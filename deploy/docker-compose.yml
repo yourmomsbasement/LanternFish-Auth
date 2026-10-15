@@ -1,0 +1,54 @@
+# Lanternfish Gate in front of Jellyfin.
+#
+# The important part: Jellyfin publishes NO ports. The only way in from the
+# network is through the Gate. A gate that can be routed around protects nothing.
+#
+# Before the first start:
+#   mkdir -p secrets
+#   docker run --rm lanternfish-gate gen-master-key > secrets/master_key
+#   chmod 600 secrets/master_key
+# Then put your TLS certificate (full chain) and key in ./certs.
+
+services:
+  gate:
+    build: ..
+    image: lanternfish-gate
+    restart: unless-stopped
+    ports:
+      - "443:8443"
+    environment:
+      LANTERNFISH_UPSTREAM: http://jellyfin:8096
+      LANTERNFISH_MASTER_KEY_FILE: /run/secrets/master_key
+      LANTERNFISH_TLS_CERT: /certs/fullchain.pem
+      LANTERNFISH_TLS_KEY: /certs/privkey.pem
+      # LANTERNFISH_ALERT_WEBHOOK: https://discord.com/api/webhooks/...
+    secrets:
+      - master_key
+    volumes:
+      - gate-data:/data
+      - ./certs:/certs:ro
+    networks:
+      - jellyfin
+
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    restart: unless-stopped
+    # No "ports:" here, on purpose.
+    volumes:
+      - jellyfin-config:/config
+      - jellyfin-cache:/cache
+      - /path/to/media:/media:ro
+    networks:
+      - jellyfin
+
+networks:
+  jellyfin:
+
+secrets:
+  master_key:
+    file: ./secrets/master_key
+
+volumes:
+  gate-data:
+  jellyfin-config:
+  jellyfin-cache:
