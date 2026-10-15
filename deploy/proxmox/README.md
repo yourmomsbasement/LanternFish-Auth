@@ -39,11 +39,10 @@ The easiest way is to download them from the repository's **Releases** page:
 
 * `lanternfish-gate_<version>_linux_amd64.tar.gz`: the Gate binary, plus
   this `deploy/` folder.
-* `jellyfin-plugin-lanternfish-gate_<version>.zip`: unzipped, it is already
-  the `LanternfishGate_<version>` folder that goes into Jellyfin's `plugins/`.
+* `jellyfin-plugin-lanternfish-gate_<version>.zip`: the plugin DLL and
+  `meta.json`. Unzip it into `plugin-out/`.
 
-Check them with `sha256sum -c SHA256SUMS --ignore-missing`. If you use the
-release files, read `plugin-out/` below as the unzipped plugin folder.
+Check them with `sha256sum -c SHA256SUMS --ignore-missing`.
 
 Or build them yourself, on any machine with Go and the .NET 10 SDK:
 
@@ -119,12 +118,12 @@ exit
 **Install the plugin.** It doesn't enforce anything until a key is set (step 5):
 
 ```sh
-pct exec 202 -- mkdir -p /var/lib/jellyfin/plugins/LanternfishGate_1.0.0.0
+pct exec 202 -- mkdir -p /var/lib/jellyfin/plugins/LanternfishGate
 pct push 202 /root/lanternfish/plugin-out/Jellyfin.Plugin.LanternfishGate.dll \
-  /var/lib/jellyfin/plugins/LanternfishGate_1.0.0.0/Jellyfin.Plugin.LanternfishGate.dll
+  /var/lib/jellyfin/plugins/LanternfishGate/Jellyfin.Plugin.LanternfishGate.dll
 pct push 202 /root/lanternfish/plugin-out/meta.json \
-  /var/lib/jellyfin/plugins/LanternfishGate_1.0.0.0/meta.json
-pct exec 202 -- chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/LanternfishGate_1.0.0.0
+  /var/lib/jellyfin/plugins/LanternfishGate/meta.json
+pct exec 202 -- chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/LanternfishGate
 ```
 
 ## 4. CT 201: Gate
@@ -278,7 +277,10 @@ paste it in.
 * **Updating the Gate:** build a new binary, push it, re-run
   `install-gate.sh` (it leaves your settings and keys alone), then
   `systemctl restart lanternfish-gate`.
-* **Updating the plugin:** push the new DLL over the old one, then
+* **Updating the plugin:** add
+  `https://github.com/yourmomsbasement/LanternFish-Auth/releases/latest/download/manifest.json`
+  under Dashboard → Plugins → Repositories, and Jellyfin offers updates
+  itself. Or push the new DLL over the old one and run
   `systemctl restart jellyfin`.
 * **Clocks:** the containers share the host's clock, so the Gate and Jellyfin
   always agree. Keep NTP (chrony) running on the Proxmox host.

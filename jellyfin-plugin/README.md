@@ -28,18 +28,32 @@ dotnet publish Jellyfin.Plugin.LanternfishGate -c Release -o out
 
 ## Install
 
-1. Copy `out/Jellyfin.Plugin.LanternfishGate.dll` and `out/meta.json` into
-   Jellyfin's plugins directory, in a folder named
-   `LanternfishGate_1.0.0.0`:
-   * Docker: `/config/plugins/LanternfishGate_1.0.0.0/`
-   * Linux packages: `/var/lib/jellyfin/plugins/LanternfishGate_1.0.0.0/`
-   * Windows: `%ProgramData%\Jellyfin\Server\plugins\LanternfishGate_1.0.0.0\`
-2. Restart Jellyfin. Until a key is configured the plugin **does not
-   enforce**; it only logs a warning. That way, installing it can't lock you
-   out.
-3. Run `lanternfish-gate upstream-key` (the key is also printed in the Gate's
-   log at startup). Through the Gate, open **Dashboard → Plugins → Lanternfish
-   Gate**, paste the key and save. Enforcement starts immediately.
+**First install (manual).** Download `jellyfin-plugin-lanternfish-gate_<version>.zip`
+from the latest release, or build it yourself (above). Unzip it into a new
+folder in Jellyfin's plugins directory named `LanternfishGate_<version>`:
+
+* Docker: `/config/plugins/LanternfishGate_<version>/`
+* Linux packages: `/var/lib/jellyfin/plugins/LanternfishGate_<version>/`
+* Windows: `%ProgramData%\Jellyfin\Server\plugins\LanternfishGate_<version>\`
+
+Then restart Jellyfin. Until a key is configured the plugin **does not
+enforce**; it only logs a warning. That way, installing it can't lock you
+out.
+
+**Updates (from Jellyfin).** Add this under **Dashboard → Plugins →
+Repositories**:
+
+```
+https://github.com/yourmomsbasement/LanternFish-Auth/releases/latest/download/manifest.json
+```
+
+New releases then show up as plugin updates. If you switch an existing manual
+install to the repository, delete the manual `LanternfishGate_<version>`
+folder after the repository copy is installed, so only one copy remains.
+
+**Set the key.** Run `lanternfish-gate upstream-key`; the key is also printed
+in the Gate's log at startup. Through the Gate, open **Dashboard → Plugins →
+Lanternfish Gate**, paste the key and save. Enforcement starts immediately.
 
 You can also write the settings file before the first start:
 `plugins/configurations/Jellyfin.Plugin.LanternfishGate.xml`
@@ -67,5 +81,5 @@ above, or remove the plugin folder, and restart Jellyfin.
 
 ## Locked out?
 
-Either delete `plugins/LanternfishGate_1.0.0.0/`, or clear `GatePublicKeys` in
+Either delete `plugins/LanternfishGate_<version>/`, or clear `GatePublicKeys` in
 the XML file, then restart Jellyfin.

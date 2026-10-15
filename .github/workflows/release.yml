@@ -76,15 +76,32 @@ jobs:
           esac
           dotnet publish jellyfin-plugin/Jellyfin.Plugin.LanternfishGate -c Release -o out \
             -p:Version="$numeric" -p:AssemblyVersion="$asm" -p:FileVersion="$asm"
-          folder="LanternfishGate_$asm"
-          mkdir -p "dist/$folder"
-          cp out/Jellyfin.Plugin.LanternfishGate.dll "dist/$folder/"
-          jq --arg v "$asm" --arg t "$(date -u +%Y-%m-%dT%H:%M:%S.0000000Z)" \
-            '.version = $v | .timestamp = $t' out/meta.json > "dist/$folder/meta.json"
-          cd dist
-          zip -qr "jellyfin-plugin-lanternfish-gate_${version}.zip" "$folder"
-          rm -r "$folder"
-          ls -l
+          timestamp="$(date -u +%Y-%m-%dT%H:%M:%S.0000000Z)"
+          mkdir -p dist pkg
+          cp out/Jellyfin.Plugin.LanternfishGate.dll pkg/
+          jq --arg v "$asm" --arg t "$timestamp" '.version = $v | .timestamp = $t' out/meta.json > pkg/meta.json
+
+          # Flat zip: Jellyfin extracts it straight into plugins/<Name>_<version>/.
+          zip_name="jellyfin-plugin-lanternfish-gate_${version}.zip"
+          (cd pkg && zip -qX "../dist/$zip_name" Jellyfin.Plugin.LanternfishGate.dll meta.json)
+
+          # Plugin repository manifest, so Jellyfin can install and update the
+          # plugin itself (Dashboard -> Plugins -> Repositories).
+          md5=$(md5sum "dist/$zip_name" | cut -d' ' -f1)
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${zip_name}"
+          notes="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
+          jq -n --slurpfile m pkg/meta.json --arg v "$asm" --arg url "$url" --arg md5 "$md5" \
+            --arg t "$timestamp" --arg notes "See $notes" '[{
+              guid: $m[0].guid, name: $m[0].name, description: $m[0].description,
+              overview: $m[0].overview, owner: $m[0].owner, category: $m[0].category,
+              imageUrl: "",
+              versions: [{
+                version: $v, changelog: $notes, targetAbi: $m[0].targetAbi,
+                sourceUrl: $url, checksum: $md5, timestamp: $t
+              }]
+            }]' > dist/manifest.json
+          ls -l dist
+          cat dist/manifest.json
       - uses: actions/upload-artifact@v4
         with:
           name: jellyfin-plugin
@@ -120,10 +137,14 @@ jobs:
           | \`lanternfish-gate_${version}_linux_amd64.tar.gz\` | Gate for Linux x86-64 (Proxmox LXC), with \`deploy/\` scripts and docs |
           | \`lanternfish-gate_${version}_linux_arm64.tar.gz\` | Gate for Linux ARM64 (Raspberry Pi 4/5 and similar) |
           | \`lanternfish-gate_${version}_windows_amd64.zip\` | Gate for Windows |
-          | \`jellyfin-plugin-lanternfish-gate_${version}.zip\` | Jellyfin 12.2+ plugin: unzip into Jellyfin's \`plugins/\` folder |
+          | \`jellyfin-plugin-lanternfish-gate_${version}.zip\` | Jellyfin 12.2+ plugin: unzip into \`plugins/LanternfishGate_${version}/\` |
+          | \`manifest.json\` | Jellyfin plugin repository manifest |
           | \`SHA256SUMS\` | Checksums (\`sha256sum -c SHA256SUMS\`) |
 
           Setup on Proxmox: \`deploy/proxmox/README.md\` inside the Gate archive.
+
+          **Install or update the plugin from inside Jellyfin:** Dashboard → Plugins → Repositories → add
+          \`https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/manifest.json\`
           NOTES
           gh release create "$GITHUB_REF_NAME" dist/* \
             --title "Lanternfish $GITHUB_REF_NAME" --notes-file notes.md --verify-tag $prerelease

@@ -111,6 +111,25 @@ session renews before it expires.
 * The admin API only answers from private networks by default. Narrow
   `LANTERNFISH_ADMIN_ALLOW` to the PC that runs Builder.
 
+## Installing the Jellyfin plugin from Jellyfin
+
+Once you can reach Jellyfin's dashboard through the Gate, add this repository
+under **Dashboard → Plugins → Repositories**:
+
+```
+https://github.com/yourmomsbasement/LanternFish-Auth/releases/latest/download/manifest.json
+```
+
+Jellyfin then installs and updates the plugin itself. The first install is
+manual; see [jellyfin-plugin/README.md](jellyfin-plugin/README.md).
+
+## Releases
+
+Push a tag like `v0.2.0` (or `v0.2.0-rc1` for a pre-release) and the
+[release workflow](.github/workflows/release.yml) does the rest. It runs CI,
+builds the Gate for Linux (amd64, arm64) and Windows, builds the plugin and
+its repository manifest, and publishes everything with `SHA256SUMS`.
+
 ## Development
 
 ```sh
@@ -121,3 +140,10 @@ dotnet test jellyfin-plugin/Jellyfin.Plugin.LanternfishGate.sln   # plugin
 The Gate uses only the Go standard library. Both test suites check
 `testdata/upstream-vector.json`, a request signed by the Gate, so the two
 sides can't drift apart.
+
+## Security and license
+
+Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+
+Licensed under the [GNU General Public License v3.0](LICENSE). The Jellyfin
+plugin builds against Jellyfin's GPL-3.0 libraries.
