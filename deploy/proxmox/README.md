@@ -58,7 +58,24 @@ folder to the Proxmox host, for example into `/root/lanternfish/`.
 
 Append [`vmbr1.interfaces`](vmbr1.interfaces) to `/etc/network/interfaces`,
 then run `ifreload -a`. Check that `ip -br addr show vmbr1` shows
-`10.20.0.1/24`.
+`10.20.0.1/24`, and that `iptables -t nat -S POSTROUTING` shows a
+`MASQUERADE` line for `10.20.0.0/24`.
+
+**No MASQUERADE line?** This happens if `vmbr1` was created in the web UI, or
+already existed before you added the `post-up` lines. Add them to the `vmbr1`
+section in `/etc/network/interfaces` so they apply at boot, and add the rule
+by hand for now:
+
+```sh
+iptables -t nat -A POSTROUTING -s 10.20.0.0/24 -o vmbr0 -j MASQUERADE
+iptables -t raw -I PREROUTING -i fwbr+ -j CT --zone 1
+echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/99-lanternfish-forward.conf
+```
+
+Without the rule, containers on `vmbr1` have no internet, and `apt` inside
+them hangs. If your host's internet connection isn't on `vmbr0`
+(`ip route | grep default` shows another device), use that device in the
+rule instead.
 
 ## 2. Host: key folder and template
 
@@ -191,11 +208,14 @@ openssl pkey -in spare-key.pem -pubout -outform der | openssl dgst -sha256 -bina
 ## 6. Keys, plugin, start
 
 Run these from the host. Jellyfin's dashboard isn't reachable yet, so the
-plugin's key goes straight into its settings file.
+plugin's key goes straight into its settings file. `pct exec` doesn't search
+`/usr/local/sbin`, so `lanternfish-gatectl` is called by its full path.
 
 ```sh
-pct exec 201 -- lanternfish-gatectl admin-key create -name builder   # shown once: store it for Builder
-KEY=$(pct exec 201 -- lanternfish-gatectl upstream-key | tail -1)
+pct exec 201 -- systemctl stop lanternfish-gate        # gatectl needs the Gate stopped
+pct exec 201 -- /usr/local/sbin/lanternfish-gatectl admin-key create -name builder   # shown once: store it for Builder
+KEY=$(pct exec 201 -- /usr/local/sbin/lanternfish-gatectl upstream-key | tail -1)
+echo "$KEY"    # must start with MFkw; if it's empty, stop here
 
 pct exec 202 -- mkdir -p /var/lib/jellyfin/plugins/configurations
 pct exec 202 -- sh -c "cat > /var/lib/jellyfin/plugins/configurations/Jellyfin.Plugin.LanternfishGate.xml" <<EOF
@@ -213,7 +233,21 @@ pct exec 201 -- systemctl start lanternfish-gate
 pct exec 201 -- journalctl -u lanternfish-gate -n 20
 ```
 
-From now on Jellyfin answers `403` to anything the Gate didn't sign.
+From now on Jellyfin answers `403` to anything the Gate didn't sign. Check
+it with
+`pct exec 202 -- curl -s -o /dev/null -w '%{http_code}\n' localhost:8096/System/Info/Public`,
+which should print `403`.
+
+**`load TLS certificate: … permission denied` in the log?** The Gate runs as
+the `lanternfish` user and can't read the key. That happens with a
+certificate you put in place by hand; the certbot hook sets this up for you.
+Fix it with:
+
+```sh
+pct exec 201 -- chown root:lanternfish /etc/lanternfish/tls/privkey.pem /etc/lanternfish/tls/fullchain.pem
+pct exec 201 -- chmod 640 /etc/lanternfish/tls/privkey.pem
+pct exec 201 -- systemctl restart lanternfish-gate
+```
 
 ## 7. Firewall
 

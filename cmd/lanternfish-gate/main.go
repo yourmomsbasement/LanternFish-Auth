@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -48,6 +49,8 @@ Environment:
   LANTERNFISH_MASTER_KEY         base64 master key
   LANTERNFISH_ALERT_WEBHOOK      webhook for enrollment/revocation alerts (Discord-compatible)
   LANTERNFISH_SESSION_TTL        session lifetime (default 15m)
+  LANTERNFISH_INJECT_RENEWAL     set to false to stop adding the session-renewal script to
+                                 Jellyfin's web client when the Jellyfin plugin hasn't (default true)
   LANTERNFISH_ADMIN_ALLOW        networks the admin API answers from, comma-separated CIDRs
                                  (default: loopback and private ranges; add 100.64.0.0/10 for Tailscale)
 `
@@ -117,6 +120,13 @@ func loadConfig() (gate.Config, error) {
 			return cfg, fmt.Errorf("LANTERNFISH_ADMIN_ALLOW: %w", err)
 		}
 		cfg.AdminAllow = nets
+	}
+	if v := os.Getenv("LANTERNFISH_INJECT_RENEWAL"); v != "" {
+		on, err := strconv.ParseBool(v)
+		if err != nil {
+			return cfg, fmt.Errorf("LANTERNFISH_INJECT_RENEWAL must be true or false")
+		}
+		cfg.DisableRenewalInjection = !on
 	}
 	if v := os.Getenv("LANTERNFISH_SESSION_TTL"); v != "" {
 		d, err := time.ParseDuration(v)

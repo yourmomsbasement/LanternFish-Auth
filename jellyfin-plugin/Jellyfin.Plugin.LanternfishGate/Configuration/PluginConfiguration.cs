@@ -16,4 +16,11 @@ public class PluginConfiguration : BasePluginConfiguration
 
     /// <summary>Gets or sets a value indicating whether unsigned GET /health from this machine is allowed (Docker health checks).</summary>
     public bool AllowLoopbackHealthCheck { get; set; } = true;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the plugin adds the Gate's
+    /// session-renewal script to the web client. When off, the Gate adds it
+    /// itself unless LANTERNFISH_INJECT_RENEWAL=false.
+    /// </summary>
+    public bool InjectSessionRenewal { get; set; } = true;
 }

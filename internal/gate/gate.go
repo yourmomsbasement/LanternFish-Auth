@@ -37,6 +37,10 @@ type Config struct {
 	// does not exist (404). Default: DefaultAdminAllow.
 	AdminAllow []netip.Prefix
 
+	// DisableRenewalInjection stops the Gate adding the session-renewal
+	// script to Jellyfin's web client (see renewal.go).
+	DisableRenewalInjection bool
+
 	// Now overrides the clock in tests.
 	Now func() time.Time
 }
@@ -151,11 +155,12 @@ func New(cfg Config) (*Gate, error) {
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(cfg.Upstream)
 			pr.SetXForwarded()
+			g.prepareRenewal(pr.Out)
 			g.signUpstream(pr.Out)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			resp.Header.Set("Strict-Transport-Security", hstsValue)
-			return nil
+			return g.injectRenewal(resp)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("proxy: %s %s: %v", r.Method, r.URL.Path, err)
@@ -214,24 +219,32 @@ func (g *Gate) routes() http.Handler {
 	})
 }
 
-// authenticate returns the active device behind a request, if any.
+// How a request authenticated, as told to Jellyfin in X-Lanternfish-Auth.
+const (
+	authCertificate = "certificate"
+	authCookie      = "cookie" // a browser holding a WebCrypto key
+	authHeader      = "header" // an app sending X-Lanternfish-Session
+)
+
+// authenticate returns the active device behind a request, if any, and how it
+// authenticated.
 func (g *Gate) authenticate(r *http.Request) (*Device, string) {
 	if r.TLS != nil && len(r.TLS.VerifiedChains) > 0 && len(r.TLS.VerifiedChains[0]) > 0 {
 		leaf := r.TLS.VerifiedChains[0][0]
 		if dev := g.activeDevice(leaf.Subject.CommonName); dev != nil && dev.Kind == KindECDSA &&
 			string(dev.PublicKey) == string(leaf.RawSubjectPublicKeyInfo) {
-			return dev, "certificate"
+			return dev, authCertificate
 		}
 	}
-	token := r.Header.Get(sessionHeader)
+	token, how := r.Header.Get(sessionHeader), authHeader
 	if token == "" {
 		if c, err := r.Cookie(sessionCookie); err == nil {
-			token = c.Value
+			token, how = c.Value, authCookie
 		}
 	}
 	if deviceID, ok := g.sessions.lookup(token, g.cfg.Now()); ok {
 		if dev := g.activeDevice(deviceID); dev != nil {
-			return dev, "session"
+			return dev, how
 		}
 	}
 	return nil, ""
@@ -250,7 +263,7 @@ func (g *Gate) activeDevice(id string) *Device {
 }
 
 func (g *Gate) serveProxy(w http.ResponseWriter, r *http.Request) {
-	dev, _ := g.authenticate(r)
+	dev, how := g.authenticate(r)
 	if dev == nil {
 		if r.Method == http.MethodGet && acceptsHTML(r) {
 			http.Redirect(w, r, pathPrefix+"?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
@@ -272,6 +285,7 @@ func (g *Gate) serveProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	r.Header.Set(deviceHeader, dev.ID)
+	r.Header.Set(authKindHeader, how)
 	g.proxy.ServeHTTP(w, r)
 }
 

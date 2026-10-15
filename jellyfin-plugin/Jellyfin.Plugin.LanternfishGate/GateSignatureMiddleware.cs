@@ -111,6 +111,11 @@ public sealed class GateSignatureMiddleware
             return Reject(context, StatusCodes.Status403Forbidden, "requests must come through Lanternfish Gate");
         }
 
+        if (policy.InjectSessionRenewal && SessionRenewal.Applies(request))
+        {
+            return SessionRenewal.InjectAsync(context, _next);
+        }
+
         return _next(context);
     }
 
