@@ -32,6 +32,7 @@ type harness struct {
 
 	mu       sync.Mutex
 	upstream []*http.Request
+	respond  http.HandlerFunc // stands in for Jellyfin when set
 }
 
 func newHarness(t *testing.T) *harness {
@@ -40,7 +41,12 @@ func newHarness(t *testing.T) *harness {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		h.upstream = append(h.upstream, r.Clone(r.Context()))
+		respond := h.respond
 		h.mu.Unlock()
+		if respond != nil {
+			respond(w, r)
+			return
+		}
 		io.WriteString(w, "jellyfin")
 	}))
 	t.Cleanup(up.Close)

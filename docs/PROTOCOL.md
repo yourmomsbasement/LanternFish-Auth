@@ -154,8 +154,10 @@ is authenticated in one of these ways:
    `lf_session` cookie.
 
 Before forwarding, the Gate removes `lf_session` and `X-Lanternfish-Session`
-from the request, and replaces any incoming `X-Lanternfish-Device` header with
-the authenticated device ID.
+from the request. It replaces any incoming `X-Lanternfish-Device` header with
+the authenticated device ID, and any incoming `X-Lanternfish-Auth` with how
+the request authenticated: `certificate`, `cookie` (a browser) or `header`
+(an app sending `X-Lanternfish-Session`).
 
 The Gate then **signs** the forwarded request (see *Signed requests to
 Jellyfin* below), so Jellyfin can refuse anything that did not come through
@@ -165,6 +167,31 @@ Unauthenticated requests receive `401 {"error": "lanternfish_auth_required"}`.
 The exception is a browser page navigation (a `GET` whose `Accept` includes
 `text/html`). That is redirected to the Gate's sign-in page at
 `/_lanternfish/?next=<path>`.
+
+### Session renewal in the web client
+
+A browser's session lasts 15 minutes. A page load after that signs in again
+silently. The Jellyfin web app, though, is a single page whose background
+requests would start failing with `401` until a reload. To prevent that, the
+web client's `index.html` loads
+`<script src="/_lanternfish/gate-client.js" data-autorenew></script>`, which
+renews the session at about two-thirds of its lifetime, and again whenever
+the tab becomes visible after it was due.
+
+The script is added only for `GET` requests to `…/web/` or
+`…/web/index.html` from browsers that authenticated with a cookie
+(`X-Lanternfish-Auth: cookie`). Apps never get it, because it would send them
+to the browser sign-in page. It is added in exactly one place:
+
+1. **The Jellyfin plugin**, when its *Keep browser sessions alive* setting is
+   on (the default). It marks the response with `X-Lanternfish-Renewal`.
+2. **Otherwise, the Gate**, as the page passes through. Set
+   `LANTERNFISH_INJECT_RENEWAL=false` to stop that too.
+
+The Gate removes the marker before the response reaches the browser. To be
+able to edit the page, whichever side adds the script asks Jellyfin for it
+uncompressed and unconditionally (no `If-None-Match`), and drops `ETag` and
+`Last-Modified` from the edited page.
 
 ### 5. Revocation
 

@@ -32,6 +32,16 @@
                         </label>
                         <div class="fieldDescription checkboxFieldDescription">Lets Docker's <code>/health</code> check keep working.</div>
                     </div>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
+                            <input is="emby-checkbox" type="checkbox" id="InjectSessionRenewal">
+                            <span>Keep browser sessions alive in the web client</span>
+                        </label>
+                        <div class="fieldDescription checkboxFieldDescription">
+                            Adds the Gate's renewal script to the web client, so signed-in browsers renew their
+                            15-minute Gate session in the background. If this is off, the Gate adds the script itself.
+                        </div>
+                    </div>
                     <p id="LanternfishGateError" style="color: #cc4444;" hidden></p>
                     <div>
                         <button is="emby-button" type="submit" class="raised button-submit block emby-button">
@@ -61,6 +71,7 @@
                         page.querySelector('#GatePublicKeys').value = config.GatePublicKeys || '';
                         page.querySelector('#MaxClockSkewSeconds').value = config.MaxClockSkewSeconds;
                         page.querySelector('#AllowLoopbackHealthCheck').checked = config.AllowLoopbackHealthCheck;
+                        page.querySelector('#InjectSessionRenewal').checked = config.InjectSessionRenewal;
                         Dashboard.hideLoadingMsg();
                     });
                 });
@@ -80,6 +91,7 @@
                         config.GatePublicKeys = keys;
                         config.MaxClockSkewSeconds = parseInt(page.querySelector('#MaxClockSkewSeconds').value, 10) || 30;
                         config.AllowLoopbackHealthCheck = page.querySelector('#AllowLoopbackHealthCheck').checked;
+                        config.InjectSessionRenewal = page.querySelector('#InjectSessionRenewal').checked;
                         ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
                             Dashboard.processPluginConfigurationUpdateResult(result);
                         });

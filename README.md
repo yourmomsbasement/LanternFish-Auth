@@ -93,9 +93,10 @@ curl -X POST https://your.host/_lanternfish/admin/v1/tickets \
 
 Open `https://your.host/` in the browser, paste the `ticket` when asked, and
 you're in. The browser keeps a non-extractable key and signs in again on its
-own after that. For long-running pages, the Jellyfin web client should include
-`<script src="/_lanternfish/gate-client.js" data-autorenew></script>` so the
-session renews before it expires.
+own after that. While the Jellyfin web app is open, its 15-minute Gate session
+renews in the background. The renewal script is added to the web client by
+the Jellyfin plugin, or by the Gate when the plugin doesn't (see
+[Session renewal](docs/PROTOCOL.md#session-renewal-in-the-web-client)).
 
 ## Hardening checklist
 
