@@ -28,6 +28,10 @@ The full protocol, for client implementers, is in
 
 ## Running it
 
+**On Proxmox:** follow [deploy/proxmox/README.md](deploy/proxmox/README.md).
+It covers two LXC containers, an internal-only bridge for Jellyfin, the
+firewall rules, a systemd service and certbot.
+
 ### Docker (Linux)
 
 See [deploy/docker-compose.yml](deploy/docker-compose.yml). Jellyfin publishes
@@ -104,6 +108,8 @@ session renews before it expires.
   certificate, or a renewal will brick your TVs.
 * Give Lanternfish Builder its own admin key, never your Jellyfin admin
   password.
+* The admin API only answers from private networks by default. Narrow
+  `LANTERNFISH_ADMIN_ALLOW` to the PC that runs Builder.
 
 ## Development
 

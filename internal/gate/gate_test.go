@@ -68,7 +68,15 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
+// testClientAddr is on a private network, where the admin API answers.
+const testClientAddr = "192.168.1.50:5555"
+
 func (h *harness) do(method, path string, body any, hdr map[string]string) *httptest.ResponseRecorder {
+	h.t.Helper()
+	return h.doFrom(testClientAddr, method, path, body, hdr)
+}
+
+func (h *harness) doFrom(remote, method, path string, body any, hdr map[string]string) *httptest.ResponseRecorder {
 	h.t.Helper()
 	var rd io.Reader
 	if body != nil {
@@ -76,7 +84,7 @@ func (h *harness) do(method, path string, body any, hdr map[string]string) *http
 		rd = bytes.NewReader(raw)
 	}
 	req := httptest.NewRequest(method, "https://gate.example"+path, rd)
-	req.RemoteAddr = "192.0.2.10:5555"
+	req.RemoteAddr = remote
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
@@ -484,5 +492,48 @@ func TestClientCertificate(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("no cert: %d", resp.StatusCode)
+	}
+}
+
+func TestAdminAPIOnlyFromAllowedNetworks(t *testing.T) {
+	h := newHarness(t)
+	auth := map[string]string{"Authorization": "Bearer " + h.adminKey}
+
+	// From the internet the admin API doesn't exist, even with the right key,
+	// and probing it doesn't count against the rate limit.
+	for _, remote := range []string{"203.0.113.7:4000", "[2001:db8::1]:4000", "[::ffff:203.0.113.7]:4000"} {
+		for i := 0; i < 12; i++ {
+			rec := h.doFrom(remote, "GET", "/_lanternfish/admin/v1/devices", nil, auth)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s: got %d", remote, rec.Code)
+			}
+		}
+	}
+	// Device endpoints still work from the internet.
+	if rec := h.doFrom("203.0.113.7:4000", "POST", "/_lanternfish/v1/challenge", map[string]string{"device_id": "dev_x"}, nil); rec.Code != http.StatusOK {
+		t.Fatalf("challenge from internet: %d", rec.Code)
+	}
+	for _, remote := range []string{"192.168.1.50:1", "127.0.0.1:1", "[::1]:1", "[::ffff:10.1.2.3]:1"} {
+		if rec := h.doFrom(remote, "GET", "/_lanternfish/admin/v1/devices", nil, auth); rec.Code != http.StatusOK {
+			t.Fatalf("%s: got %d", remote, rec.Code)
+		}
+	}
+
+	// A custom list replaces the default.
+	nets, err := ParseAdminAllow(" 100.64.0.0/10 , 203.0.113.7 ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.g.cfg.AdminAllow = nets
+	if rec := h.doFrom("203.0.113.7:4000", "GET", "/_lanternfish/admin/v1/devices", nil, auth); rec.Code != http.StatusOK {
+		t.Fatalf("explicitly allowed host: %d", rec.Code)
+	}
+	if rec := h.doFrom("192.168.1.50:1", "GET", "/_lanternfish/admin/v1/devices", nil, auth); rec.Code != http.StatusNotFound {
+		t.Fatalf("no longer allowed LAN host: %d", rec.Code)
+	}
+	for _, bad := range []string{"", "nonsense", "10.0.0.0/33"} {
+		if _, err := ParseAdminAllow(bad); err == nil {
+			t.Errorf("ParseAdminAllow(%q) accepted", bad)
+		}
 	}
 }

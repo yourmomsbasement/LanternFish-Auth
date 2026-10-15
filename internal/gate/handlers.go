@@ -309,6 +309,11 @@ type adminHandler func(w http.ResponseWriter, r *http.Request, key *AdminKey)
 
 func (g *Gate) admin(h adminHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Outside the allowed networks the admin API doesn't exist at all.
+		if !g.adminAllowed(clientIP(r)) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
 		if !g.guard(w, r) {
 			return
 		}

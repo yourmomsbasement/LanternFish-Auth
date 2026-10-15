@@ -44,6 +44,8 @@ Environment:
   LANTERNFISH_MASTER_KEY         base64 master key
   LANTERNFISH_ALERT_WEBHOOK      webhook for enrollment/revocation alerts (Discord-compatible)
   LANTERNFISH_SESSION_TTL        session lifetime (default 15m)
+  LANTERNFISH_ADMIN_ALLOW        networks the admin API answers from, comma-separated CIDRs
+                                 (default: loopback and private ranges; add 100.64.0.0/10 for Tailscale)
 `
 
 func main() {
@@ -103,6 +105,13 @@ func loadConfig() (gate.Config, error) {
 		MasterKey:    key,
 		AlertWebhook: os.Getenv("LANTERNFISH_ALERT_WEBHOOK"),
 	}
+	if v := os.Getenv("LANTERNFISH_ADMIN_ALLOW"); v != "" {
+		nets, err := gate.ParseAdminAllow(v)
+		if err != nil {
+			return cfg, fmt.Errorf("LANTERNFISH_ADMIN_ALLOW: %w", err)
+		}
+		cfg.AdminAllow = nets
+	}
 	if v := os.Getenv("LANTERNFISH_SESSION_TTL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < time.Minute || d > 24*time.Hour {
@@ -157,6 +166,11 @@ func serve() error {
 	}()
 	log.Printf("listening on %s, proxying to %s", srv.Addr, cfg.Upstream)
 	log.Printf("requests to Jellyfin are signed; Lanternfish plugin key: %s", g.UpstreamPublicKey())
+	adminNets := cfg.AdminAllow
+	if adminNets == nil {
+		adminNets = gate.DefaultAdminAllow
+	}
+	log.Printf("admin API answers only from %v", adminNets)
 	if err := srv.ListenAndServeTLS("", ""); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

@@ -1,0 +1,25 @@
+#!/bin/sh
+# Runs offline lanternfish-gate commands (admin-key, upstream-key, device-ca)
+# with the service's settings, then hands the data back to the service user.
+set -eu
+
+case "${1:-}" in
+  ""|serve)
+    echo "usage: lanternfish-gatectl admin-key create -name NAME | admin-key list | admin-key revoke ID | upstream-key | device-ca" >&2
+    exit 2 ;;
+esac
+
+if systemctl is-active --quiet lanternfish-gate 2>/dev/null; then
+  echo "lanternfish-gate is running; stop it first: systemctl stop lanternfish-gate" >&2
+  exit 1
+fi
+
+set -a
+# shellcheck source=/dev/null
+. /etc/lanternfish/gate.env
+set +a
+
+status=0
+/usr/local/bin/lanternfish-gate "$@" || status=$?
+chown -R lanternfish:lanternfish /var/lib/lanternfish
+exit "$status"

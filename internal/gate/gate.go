@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"os"
 	"time"
@@ -31,6 +32,10 @@ type Config struct {
 	MaxTicketTTL  time.Duration // default 24h
 	FailureLimit  int           // default 10
 	FailureWindow time.Duration // default 10m
+
+	// AdminAllow lists the networks the admin API answers from; elsewhere it
+	// does not exist (404). Default: DefaultAdminAllow.
+	AdminAllow []netip.Prefix
 
 	// Now overrides the clock in tests.
 	Now func() time.Time
@@ -54,6 +59,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.FailureWindow == 0 {
 		c.FailureWindow = 10 * time.Minute
+	}
+	if c.AdminAllow == nil {
+		c.AdminAllow = DefaultAdminAllow
 	}
 	if c.Now == nil {
 		c.Now = time.Now

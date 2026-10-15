@@ -1,0 +1,15 @@
+# Proxmox firewall for CT 202 (jellyfin): /etc/pve/firewall/202.fw
+# Its NIC also needs firewall=1 in the container's network settings.
+
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: ACCEPT
+
+[RULES]
+IN ACCEPT -source 10.20.0.2 -p tcp -dport 8096 -log nolog # only the Gate may talk to Jellyfin
+# Jellyfin may reach the internet (metadata) but not your LAN, so a compromised
+# Jellyfin can't be used to attack other machines at home.
+OUT DROP -dest 192.168.0.0/16 -log nolog
+OUT DROP -dest 172.16.0.0/12 -log nolog
+OUT DROP -dest 10.0.0.0/8 -log nolog

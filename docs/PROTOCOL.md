@@ -232,7 +232,10 @@ Exceptions and failure modes:
 
 ## Admin API
 
-All admin endpoints require `Authorization: Bearer lfa_…`. Admin keys are
+Admin endpoints answer only from the networks in `LANTERNFISH_ADMIN_ALLOW`
+(default: loopback and private ranges). From anywhere else they return `404`,
+as if they didn't exist, and such probes don't count toward the rate limit.
+Inside those networks, they also require `Authorization: Bearer lfa_…`. Admin keys are
 created offline with `lanternfish-gate admin-key create`, and the Gate stores
 only their hashes. Give the Builder its own key. Never give it your Jellyfin
 admin password.
