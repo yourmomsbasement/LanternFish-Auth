@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -33,6 +34,10 @@ type Config struct {
 	MaxTicketTTL  time.Duration // default 24h
 	FailureLimit  int           // default 10
 	FailureWindow time.Duration // default 10m
+
+	// BodyReadTimeout bounds how long reading a JSON request body to the
+	// Gate's own endpoints may take. Default 10s.
+	BodyReadTimeout time.Duration
 
 	// AdminAllow lists the networks the admin API answers from; elsewhere it
 	// does not exist (404). Default: DefaultAdminAllow.
@@ -64,6 +69,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.FailureWindow == 0 {
 		c.FailureWindow = 10 * time.Minute
+	}
+	if c.BodyReadTimeout == 0 {
+		c.BodyReadTimeout = 10 * time.Second
 	}
 	if c.AdminAllow == nil {
 		c.AdminAllow = DefaultAdminAllow
@@ -104,7 +112,15 @@ type Gate struct {
 	challenges *challengeTable
 	streams    *streamTable
 	proxy      *httputil.ReverseProxy
-	handler    http.Handler
+
+	// lastAuth holds each device's latest sign-in time; it is saved to the
+	// data file only now and then (see noteAuth).
+	lastAuth sync.Map // device ID -> time.Time
+	// unsavedRevocations holds devices revoked in memory whose revocation
+	// could not be saved yet. They are treated as revoked.
+	unsavedRevocations sync.Map // device ID -> struct{}
+
+	handler http.Handler
 }
 
 func New(cfg Config) (*Gate, error) {
@@ -149,8 +165,8 @@ func New(cfg Config) (*Gate, error) {
 		upstream:   upstreamKey,
 		audit:      audit,
 		alerts:     &alerter{url: cfg.AlertWebhook, client: &http.Client{Timeout: 10 * time.Second}},
-		limiter:    newFailureLimiter(cfg.FailureLimit, cfg.FailureWindow),
-		sessions:   newSessionTable(),
+		limiter:    newFailureLimiter(cfg.FailureLimit, cfg.FailureWindow, 10000),
+		sessions:   newSessionTable(maxSessionsPerDevice),
 		challenges: newChallengeTable(10000, 32),
 		streams:    newStreamTable(),
 	}
@@ -268,6 +284,9 @@ func (g *Gate) authenticate(r *http.Request) (*Device, string) {
 
 // activeDevice returns a copy of an active device, or nil.
 func (g *Gate) activeDevice(id string) *Device {
+	if _, revoked := g.unsavedRevocations.Load(id); revoked {
+		return nil
+	}
 	var out *Device
 	g.store.View(func(d *storeData) {
 		if dev, ok := d.Devices[id]; ok && dev.Active() {
@@ -349,5 +368,32 @@ func WarnIfExposed(upstream *url.URL) {
 				"Make sure Jellyfin cannot be reached except through the Gate.\n", host, ip)
 			return
 		}
+	}
+}
+
+// lastAuthSaveInterval is how stale a device's saved last sign-in time may
+// get before a sign-in writes it to the data file.
+const lastAuthSaveInterval = 15 * time.Minute
+
+// noteAuth records a successful sign-in.
+//
+// SECURITY/PERFORMANCE: every save rewrites and syncs the whole data file, so
+// saving on every 15-minute session renewal let renewals queue up behind
+// disk I/O. The exact time is kept in memory for the admin API and saved
+// only when the stored one is more than lastAuthSaveInterval old.
+func (g *Gate) noteAuth(dev *Device, now time.Time) {
+	g.lastAuth.Store(dev.ID, now)
+	if dev.LastAuthAt != nil && now.Sub(*dev.LastAuthAt) < lastAuthSaveInterval {
+		return
+	}
+	err := g.store.Update(func(d *storeData) error {
+		if stored, ok := d.Devices[dev.ID]; ok {
+			stored.LastAuthAt = &now
+		}
+		d.pruneTickets(now)
+		return nil
+	})
+	if err != nil {
+		log.Printf("save last sign-in of %s: %v", dev.ID, err)
 	}
 }

@@ -119,8 +119,14 @@
       clearTimeout(timer);
       timer = setTimeout(renew, wait);
     }
+    var inflight = false;
     function renew() {
-      signIn().then(function (s) { schedule(s.expires_at); }, function (err) {
+      // One renewal at a time: the timer and a tab becoming visible can
+      // both fire, and each sign-in creates a new session on the Gate.
+      if (inflight) return;
+      inflight = true;
+      signIn().then(function (s) { inflight = false; schedule(s.expires_at); }, function (err) {
+        inflight = false;
         if (err.status === 401 || err.status === 0) {
           location.assign("/_lanternfish/?next=" + encodeURIComponent(location.pathname + location.search + location.hash));
         } else {

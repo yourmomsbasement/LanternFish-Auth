@@ -15,9 +15,17 @@ import (
 
 // sessionTable holds live sessions in memory, keyed by token hash. Sessions
 // are short-lived, so losing them on restart only means devices re-sign.
+//
+// SECURITY: each device keeps at most perDevice sessions; a new one replaces
+// its oldest. That leaves room for several tabs and in-flight renewals, while
+// a buggy or hostile client can't grow the table without bound. Expired
+// sessions are swept at most once a minute instead of on every sign-in.
 type sessionTable struct {
-	mu   sync.Mutex
-	byID map[string]session
+	mu        sync.Mutex
+	byID      map[string]session
+	byDevice  map[string][]string // token hashes, oldest first
+	perDevice int
+	nextSweep time.Time
 }
 
 type session struct {
@@ -25,15 +33,27 @@ type session struct {
 	expires  time.Time
 }
 
-func newSessionTable() *sessionTable { return &sessionTable{byID: map[string]session{}} }
+// maxSessionsPerDevice bounds sessions per device; see sessionTable.
+const maxSessionsPerDevice = 16
+
+func newSessionTable(perDevice int) *sessionTable {
+	return &sessionTable{byID: map[string]session{}, byDevice: map[string][]string{}, perDevice: perDevice}
+}
 
 func (t *sessionTable) create(deviceID string, now time.Time, ttl time.Duration) (string, time.Time) {
 	token := "lfs_" + randomToken()
+	h := hashToken(token)
 	exp := now.Add(ttl)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.prune(now)
-	t.byID[hashToken(token)] = session{deviceID: deviceID, expires: exp}
+	t.sweep(now)
+	t.byID[h] = session{deviceID: deviceID, expires: exp}
+	list := append(t.byDevice[deviceID], h)
+	for len(list) > t.perDevice {
+		delete(t.byID, list[0])
+		list = list[1:]
+	}
+	t.byDevice[deviceID] = list
 	return token, exp
 }
 
@@ -51,25 +71,55 @@ func (t *sessionTable) lookup(token string, now time.Time) (string, bool) {
 }
 
 func (t *sessionTable) remove(token string) {
+	h := hashToken(token)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.byID, hashToken(token))
+	s, ok := t.byID[h]
+	if !ok {
+		return
+	}
+	delete(t.byID, h)
+	list := t.byDevice[s.deviceID]
+	for i, x := range list {
+		if x == h {
+			list = append(list[:i:i], list[i+1:]...)
+			break
+		}
+	}
+	if len(list) == 0 {
+		delete(t.byDevice, s.deviceID)
+	} else {
+		t.byDevice[s.deviceID] = list
+	}
 }
 
 func (t *sessionTable) removeDevice(deviceID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for k, s := range t.byID {
-		if s.deviceID == deviceID {
-			delete(t.byID, k)
-		}
+	for _, h := range t.byDevice[deviceID] {
+		delete(t.byID, h)
 	}
+	delete(t.byDevice, deviceID)
 }
 
-func (t *sessionTable) prune(now time.Time) {
-	for k, s := range t.byID {
-		if !now.Before(s.expires) {
-			delete(t.byID, k)
+func (t *sessionTable) sweep(now time.Time) {
+	if now.Before(t.nextSweep) {
+		return
+	}
+	t.nextSweep = now.Add(time.Minute)
+	for dev, list := range t.byDevice {
+		kept := list[:0]
+		for _, h := range list {
+			if s, ok := t.byID[h]; ok && now.Before(s.expires) {
+				kept = append(kept, h)
+			} else {
+				delete(t.byID, h)
+			}
+		}
+		if len(kept) == 0 {
+			delete(t.byDevice, dev)
+		} else {
+			t.byDevice[dev] = kept
 		}
 	}
 }
@@ -201,12 +251,22 @@ func sourceKey(ip string) string {
 	return a.String()
 }
 
-// failureLimiter blocks an IP after too many failed credentials in a window.
+// failureLimiter blocks a source after too many failed credentials in a
+// window.
+//
+// SECURITY: sources are grouped like challenges (an IPv4 address, or an IPv6
+// /64), so rotating addresses within one IPv6 subnet doesn't buy a new
+// budget. The table is capped at max sources and swept at most once a
+// minute: past the cap new sources go untracked rather than growing memory
+// or making every failure scan the table. Many separate sources can still
+// spread out guesses; SECURITY.md calls the limiter a speed bump.
 type failureLimiter struct {
-	mu     sync.Mutex
-	limit  int
-	window time.Duration
-	byIP   map[string]*failures
+	mu        sync.Mutex
+	limit     int
+	window    time.Duration
+	max       int
+	nextSweep time.Time
+	bySource  map[string]*failures
 }
 
 type failures struct {
@@ -214,40 +274,39 @@ type failures struct {
 	start time.Time
 }
 
-func newFailureLimiter(limit int, window time.Duration) *failureLimiter {
-	return &failureLimiter{limit: limit, window: window, byIP: map[string]*failures{}}
+func newFailureLimiter(limit int, window time.Duration, max int) *failureLimiter {
+	return &failureLimiter{limit: limit, window: window, max: max, bySource: map[string]*failures{}}
 }
 
 func (l *failureLimiter) blocked(ip string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	f, ok := l.byIP[ip]
-	if !ok {
-		return false
-	}
-	if now.Sub(f.start) >= l.window {
-		delete(l.byIP, ip)
-		return false
-	}
-	return f.count >= l.limit
+	f, ok := l.bySource[sourceKey(ip)]
+	return ok && now.Sub(f.start) < l.window && f.count >= l.limit
 }
 
 func (l *failureLimiter) record(ip string, now time.Time) {
+	key := sourceKey(ip)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.byIP) > 10000 {
-		for k, f := range l.byIP {
-			if now.Sub(f.start) >= l.window {
-				delete(l.byIP, k)
-			}
-		}
-	}
-	f, ok := l.byIP[ip]
-	if !ok || now.Sub(f.start) >= l.window {
-		l.byIP[ip] = &failures{count: 1, start: now}
+	f, ok := l.bySource[key]
+	if ok && now.Sub(f.start) < l.window {
+		f.count++
 		return
 	}
-	f.count++
+	if !now.Before(l.nextSweep) {
+		l.nextSweep = now.Add(time.Minute)
+		for k, f := range l.bySource {
+			if now.Sub(f.start) >= l.window {
+				delete(l.bySource, k)
+			}
+		}
+		_, ok = l.bySource[key]
+	}
+	if !ok && len(l.bySource) >= l.max {
+		return
+	}
+	l.bySource[key] = &failures{count: 1, start: now}
 }
 
 // auditLog appends one JSON object per line.

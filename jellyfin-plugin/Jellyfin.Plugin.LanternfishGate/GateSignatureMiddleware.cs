@@ -108,7 +108,9 @@ public sealed class GateSignatureMiddleware
                 context.Connection.RemoteIpAddress,
                 result,
                 count);
-            return Reject(context, StatusCodes.Status403Forbidden, "requests must come through Lanternfish Gate");
+            return result == VerifyResult.Overloaded
+                ? Reject(context, StatusCodes.Status503ServiceUnavailable, "too many requests; try again shortly")
+                : Reject(context, StatusCodes.Status403Forbidden, "requests must come through Lanternfish Gate");
         }
 
         if (policy.InjectSessionRenewal && SessionRenewal.Applies(request))

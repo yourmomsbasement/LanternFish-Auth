@@ -142,7 +142,10 @@ Set-Cookie: lf_session=lfs_…; Path=/; Secure; HttpOnly; SameSite=Lax
 * Each source (an IPv4 address, or an IPv6 /64) may hold at most 32
   outstanding challenges. Past that the Gate answers `429` with `Retry-After`.
 * Clients renew by repeating the exchange before `expires_at`. Renewing at
-  about two-thirds of the lifetime works well.
+  about two-thirds of the lifetime works well. Run one renewal at a time.
+* A device holds at most 16 sessions. A new session replaces the device's
+  oldest, so a client that renews too often only invalidates its own old
+  tokens.
 * `POST /_lanternfish/v1/logout` ends the current session.
 
 ### 4. Proxied requests
@@ -209,6 +212,11 @@ client certificate is refused from the next request on, because the Gate
 looks up every certificate in its device list rather than trusting the
 certificate's validity period.
 
+If the revocation can't be saved (for example, the disk is full), the Gate
+answers `500` but still locks the device out and closes its connections
+until the Gate restarts. The device list shows `"revocation_unsaved": true`.
+Fix the problem and revoke again to make it permanent.
+
 ## Signed requests to Jellyfin
 
 Network isolation is the first lock on the Gate→Jellyfin link. The
@@ -245,7 +253,9 @@ The plugin accepts a request only when:
 * the timestamp is within ±30 seconds (configurable) of Jellyfin's clock, so
   keep both machines on NTP;
 * the nonce has not been seen before. Nonces are remembered until their
-  timestamp falls out of the window.
+  timestamp falls out of the window. The cache holds up to 200,000 nonces;
+  when it is full of unexpired ones the plugin answers `503` rather than
+  forget a nonce early.
 
 The request body is not signed, because streaming uploads can't be buffered.
 The signature binds the method, target, device and time, and the nonce makes
@@ -282,9 +292,11 @@ admin password.
 
 ## Abuse controls
 
-* Every failed ticket, signature or admin key counts against the client IP.
-  After 10 failures in 10 minutes, that IP gets `429` from all Gate endpoints
-  until the window passes.
+* Every failed ticket, signature or admin key counts against the client's
+  source: its IPv4 address, or the IPv6 /64 it is in. After 10 failures in
+  10 minutes, that source gets `429` from all Gate endpoints until the window
+  passes. The Gate tracks up to 10,000 sources at a time.
+* Request bodies to the Gate's own endpoints must arrive within 10 seconds.
 * Every enrollment, ticket, revocation and failure is appended to the audit
   log (JSON lines).
 * Enrollments and revocations are posted to `LANTERNFISH_ALERT_WEBHOOK`, using

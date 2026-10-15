@@ -60,6 +60,36 @@ public class GateTests
         Assert.Equal(VerifyResult.Ok, verifier.Verify(v.method, v.target, ts, v.nonce, v.device_id, v.signature, at));
     }
 
+    // The replay cache is capped: when full of live nonces, genuine requests
+    // are refused as overloaded rather than evicting live nonces.
+    [Fact]
+    public void ReplayCacheIsCapped()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var verifier = new GateSignatureVerifier([Convert.ToBase64String(key.ExportSubjectPublicKeyInfo())], TimeSpan.FromSeconds(30), maxNonces: 3);
+        var now = DateTimeOffset.UtcNow;
+        VerifyResult Send(string nonce, DateTimeOffset at)
+        {
+            var ts = at.ToUnixTimeSeconds().ToString();
+            var sig = key.SignData(GateSignatureVerifier.Message("GET", "/Items", ts, nonce, "dev"), HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+            return verifier.Verify("GET", "/Items", ts, nonce, "dev", Convert.ToBase64String(sig), at);
+        }
+
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.Equal(VerifyResult.Ok, Send("n" + i, now));
+        }
+
+        Assert.Equal(VerifyResult.Overloaded, Send("n3", now));
+        Assert.Equal(VerifyResult.Replayed, Send("n0", now));
+        Assert.Equal(3, verifier.NonceCount);
+
+        // Still full while the cached nonces are live; room again once they expire.
+        Assert.Equal(VerifyResult.Overloaded, Send("n3", now.AddSeconds(29)));
+        Assert.Equal(VerifyResult.Ok, Send("n3", now.AddSeconds(31)));
+        Assert.Equal(1, verifier.NonceCount);
+    }
+
     [Fact]
     public void RejectsNonP256Keys()
     {
