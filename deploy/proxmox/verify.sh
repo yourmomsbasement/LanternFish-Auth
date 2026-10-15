@@ -18,7 +18,7 @@
 # Exit status: 0 if nothing failed, 1 otherwise.
 
 # "check && pass … || fail …" is safe here: pass only prints, so it can't fail.
-# shellcheck disable=SC2015
+# shellcheck disable=SC2015,SC2016  # (SC2016: some quoted text is meant for the container or sed)
 
 set -u
 GATE=${GATE:-201}
@@ -37,7 +37,9 @@ in_gate() { pct exec "$GATE" -- "$@"; }
 in_jf() { pct exec "$JF" -- "$@"; }
 
 if [ -z "$GATE_IP" ]; then
-  GATE_IP=$(pct config "$GATE" | sed -n 's/^net0:.*ip=\([0-9.]*\).*/\1/p')
+  # The Gate's addresses, minus loopback and the internal bridge.
+  GATE_IP=$(in_gate hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.' |
+    grep -v -e '^127\.' -e "^${JF_IP%.*}\." | head -1)
 fi
 
 section "Services"
@@ -48,12 +50,17 @@ gate_version=$(in_gate /usr/local/bin/lanternfish-gate version 2>/dev/null | gre
 [ "$(in_jf systemctl is-active jellyfin 2>/dev/null)" = active ] &&
   pass "Jellyfin is running" ||
   fail "Jellyfin is not running: pct exec $JF -- journalctl -u jellyfin -n 30"
-log=$(in_jf sh -c 'ls -t /var/log/jellyfin/log_*.log 2>/dev/null | head -1')
-if [ -n "$log" ] && in_jf grep -q 'Loaded plugin: "\{0,1\}Lanternfish Gate' "$log"; then
-  jf_version=$(in_jf grep -o 'Jellyfin version: "\{0,1\}[0-9.]*' "$log" | tail -1 | grep -o '[0-9][0-9.]*')
-  pass "Jellyfin${jf_version:+ $jf_version} loaded the Lanternfish plugin"
+# Startup lines from all of Jellyfin's logs, oldest first; the last startup
+# should be followed by the plugin loading.
+startup=$(in_jf sh -c 'cat $(ls -tr /var/log/jellyfin/*.log 2>/dev/null) 2>/dev/null' |
+  grep -E 'Jellyfin version: |Loaded plugin: "?Lanternfish Gate' | sed -n '/Jellyfin version: /h;/Jellyfin version: /!H;${x;p}')
+jf_version=$(printf '%s\n' "$startup" | head -1 | grep -o 'Jellyfin version: "\{0,1\}[0-9.]*' | grep -o '[0-9][0-9.]*')
+if [ -z "$startup" ]; then
+  warn "Couldn't find Jellyfin's last startup in /var/log/jellyfin (the 403 checks below still show whether the plugin works)"
+elif printf '%s\n' "$startup" | grep -q 'Loaded plugin'; then
+  pass "Jellyfin${jf_version:+ $jf_version} loaded the Lanternfish plugin at its last start"
 else
-  fail "Lanternfish plugin not loaded in Jellyfin's current log ($log)"
+  fail "Jellyfin${jf_version:+ $jf_version} started without loading the Lanternfish plugin"
 fi
 
 section "Jellyfin only accepts the Gate"
@@ -98,13 +105,18 @@ grep -q 'MASQUERADE' /etc/network/interfaces 2>/dev/null &&
   warn "NAT rule isn't in /etc/network/interfaces, so it will be lost on reboot"
 
 section "Gate: TLS and keys"
-if echo | openssl s_client -connect "$GATE_IP:443" -tls1_2 >/dev/null 2>&1; then
-  fail "Gate accepted TLS 1.2 (expected TLS 1.3 only)"
+if [ -z "$GATE_IP" ]; then
+  fail "Couldn't find the Gate's LAN address. Rerun with GATE_IP=<address>"
+  cert=""
 else
-  pass "Gate refuses TLS 1.2"
+  cert=$(echo | openssl s_client -connect "$GATE_IP:443" -tls1_3 2>/dev/null | openssl x509 2>/dev/null)
 fi
-cert=$(echo | openssl s_client -connect "$GATE_IP:443" -tls1_3 2>/dev/null | openssl x509 2>/dev/null)
 if [ -n "$cert" ]; then
+  if echo | openssl s_client -connect "$GATE_IP:443" -tls1_2 >/dev/null 2>&1; then
+    fail "Gate accepted TLS 1.2 (expected TLS 1.3 only)"
+  else
+    pass "Gate refuses TLS 1.2"
+  fi
   subject=$(echo "$cert" | openssl x509 -noout -subject | sed 's/^subject=//')
   issuer=$(echo "$cert" | openssl x509 -noout -issuer | sed 's/^issuer=//')
   end=$(echo "$cert" | openssl x509 -noout -enddate | cut -d= -f2)
@@ -112,7 +124,7 @@ if [ -n "$cert" ]; then
   pass "TLS 1.3 works; certificate $subject, $days days left"
   [ "$subject" = "$issuer" ] && warn "Certificate is self-signed (the temporary one). Replace it with certbot before building TV apps"
   [ "$days" -lt 14 ] && warn "Certificate expires in $days days. Check: pct exec $GATE -- certbot renew --dry-run"
-else
+elif [ -n "$GATE_IP" ]; then
   fail "No TLS 1.3 connection to $GATE_IP:443"
 fi
 [ -n "$(in_gate findmnt -n /etc/lanternfish/keys 2>/dev/null)" ] &&
@@ -122,6 +134,8 @@ fi
 section "Round trip through the Gate"
 if [ -z "$ADMIN_KEY" ]; then
   warn "Skipped. Set ADMIN_KEY=lfa_… to enroll, use and revoke a temporary device"
+elif [ -z "$GATE_IP" ]; then
+  fail "Skipped: no Gate address. Rerun with GATE_IP=<address>"
 else
   out=$(GATE_URL="https://$GATE_IP" ADMIN_KEY="$ADMIN_KEY" python3 - <<'PY'
 import base64, hashlib, hmac, json, os, ssl, time, urllib.request, urllib.error
@@ -138,6 +152,9 @@ def call(method, path, body=None, headers=None):
             return r.status, r.read().decode(), dict(r.headers)
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode(), dict(e.headers)
+    except (urllib.error.URLError, OSError) as e:
+        print(f"FAIL Can't connect to {base}: {getattr(e, 'reason', e)}")
+        raise SystemExit
 
 def say(ok, msg):
     print(("PASS " if ok else "FAIL ") + msg)
