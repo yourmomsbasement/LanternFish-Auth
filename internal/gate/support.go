@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,9 +29,16 @@ type sessionTable struct {
 	nextSweep time.Time
 }
 
+// session is what a token hash maps to. It is bound to the network it was
+// issued on (when the policy binds sessions to networks) and to the policy
+// version that authorized it; a request under a newer policy is re-checked.
 type session struct {
 	deviceID string
+	issued   time.Time
 	expires  time.Time
+	network  string    // "" when not bound
+	version  int       // policy version that authorized it
+	hardEnd  time.Time // next schedule end (zero: none within the horizon)
 }
 
 // maxSessionsPerDevice bounds sessions per device; see sessionTable.
@@ -40,34 +48,91 @@ func newSessionTable(perDevice int) *sessionTable {
 	return &sessionTable{byID: map[string]session{}, byDevice: map[string][]string{}, perDevice: perDevice}
 }
 
-func (t *sessionTable) create(deviceID string, now time.Time, ttl time.Duration) (string, time.Time) {
+// create stores a new session and returns its token. perDevice (1..64)
+// bounds the device's live sessions; 0 uses the table's default.
+func (t *sessionTable) create(s session, now time.Time, perDevice int) string {
 	token := "lfs_" + randomToken()
 	h := hashToken(token)
-	exp := now.Add(ttl)
+	s.issued = now
+	if perDevice <= 0 {
+		perDevice = t.perDevice
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sweep(now)
-	t.byID[h] = session{deviceID: deviceID, expires: exp}
-	list := append(t.byDevice[deviceID], h)
-	for len(list) > t.perDevice {
+	t.byID[h] = s
+	list := append(t.byDevice[s.deviceID], h)
+	for len(list) > perDevice {
 		delete(t.byID, list[0])
 		list = list[1:]
 	}
-	t.byDevice[deviceID] = list
-	return token, exp
+	t.byDevice[s.deviceID] = list
+	return token
 }
 
-func (t *sessionTable) lookup(token string, now time.Time) (string, bool) {
+func (t *sessionTable) lookup(token string, now time.Time) (session, bool) {
 	if token == "" {
-		return "", false
+		return session{}, false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	s, ok := t.byID[hashToken(token)]
 	if !ok || !now.Before(s.expires) {
-		return "", false
+		return session{}, false
 	}
-	return s.deviceID, true
+	return s, true
+}
+
+// reauthorize records that a live session was re-checked under policy
+// version and may now last only until expires (never later than before). An
+// unbound session becomes bound to network if the policy now binds sessions.
+func (t *sessionTable) reauthorize(token string, version int, network string, expires, hardEnd time.Time) {
+	h := hashToken(token)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if s, ok := t.byID[h]; ok {
+		s.version = version
+		if s.network == "" {
+			s.network = network
+		}
+		if expires.Before(s.expires) {
+			s.expires = expires
+		}
+		s.hardEnd = hardEnd
+		t.byID[h] = s
+	}
+}
+
+// removeDeviceNetworksExcept drops a device's sessions bound to a network
+// not in keep (used when the device's approved networks change).
+func (t *sessionTable) removeDeviceNetworksExcept(deviceID string, keep map[string]bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	kept := t.byDevice[deviceID][:0]
+	for _, h := range t.byDevice[deviceID] {
+		if s, ok := t.byID[h]; ok && (s.network == "" || keep[s.network]) {
+			kept = append(kept, h)
+		} else {
+			delete(t.byID, h)
+		}
+	}
+	if len(kept) == 0 {
+		delete(t.byDevice, deviceID)
+	} else {
+		t.byDevice[deviceID] = kept
+	}
+}
+
+func (t *sessionTable) count(deviceID string, now time.Time) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := 0
+	for _, h := range t.byDevice[deviceID] {
+		if s, ok := t.byID[h]; ok && now.Before(s.expires) {
+			n++
+		}
+	}
+	return n
 }
 
 func (t *sessionTable) remove(token string) {
@@ -124,31 +189,137 @@ func (t *sessionTable) sweep(now time.Time) {
 	}
 }
 
-// streamTable tracks in-flight proxied requests per device, so revoking a
-// device can cancel them (open WebSockets and media streams included).
+// grantTable holds short-lived access grants for client-certificate
+// devices, keyed by device and network. A certificate proves possession of
+// the device key; the grant records that the policy was checked for it.
+type grantTable struct {
+	mu        sync.Mutex
+	byKey     map[string]grant
+	nextSweep time.Time
+}
+
+type grant struct {
+	expires time.Time
+	version int
+	hardEnd time.Time
+}
+
+func newGrantTable() *grantTable { return &grantTable{byKey: map[string]grant{}} }
+
+func grantKey(deviceID, network string) string { return deviceID + "|" + network }
+
+func (t *grantTable) lookup(deviceID, network string, now time.Time) (grant, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	g, ok := t.byKey[grantKey(deviceID, network)]
+	return g, ok && now.Before(g.expires)
+}
+
+func (t *grantTable) put(deviceID, network string, g grant, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !now.Before(t.nextSweep) {
+		t.nextSweep = now.Add(time.Minute)
+		for k, x := range t.byKey {
+			if !now.Before(x.expires) {
+				delete(t.byKey, k)
+			}
+		}
+	}
+	t.byKey[grantKey(deviceID, network)] = g
+}
+
+func (t *grantTable) removeDevice(deviceID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for k := range t.byKey {
+		if strings.HasPrefix(k, deviceID+"|") {
+			delete(t.byKey, k)
+		}
+	}
+}
+
+// removeDeviceNetworksExcept drops a device's grants for networks not in keep.
+func (t *grantTable) removeDeviceNetworksExcept(deviceID string, keep map[string]bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for k := range t.byKey {
+		if network, ok := strings.CutPrefix(k, deviceID+"|"); ok && network != "" && !keep[network] {
+			delete(t.byKey, k)
+		}
+	}
+}
+
+// clear drops every grant, so the next request re-checks the policy.
+func (t *grantTable) clear() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.byKey = map[string]grant{}
+}
+
+// streamTable tracks in-flight proxied requests (WebSockets and media
+// streams included), so they can be closed when their device is revoked,
+// moves network, or loses access under a new policy, and at a deadline.
+//
+// SECURITY: a deadline only ever moves earlier. Re-checking a stream under a
+// relaxed policy never extends it past what authorized it.
 type streamTable struct {
 	mu       sync.Mutex
 	next     uint64
-	byDevice map[string]map[uint64]context.CancelFunc
+	byDevice map[string]map[uint64]*stream
+	after    func(time.Duration, func()) func() bool // time.AfterFunc; replaced in tests
+}
+
+type stream struct {
+	cancel   context.CancelFunc
+	ip       string // client address, so a new policy can re-derive the network
+	network  string
+	deadline time.Time   // zero: none
+	stop     func() bool // stops the deadline timer, if any
 }
 
 func newStreamTable() *streamTable {
-	return &streamTable{byDevice: map[string]map[uint64]context.CancelFunc{}}
+	return &streamTable{
+		byDevice: map[string]map[uint64]*stream{},
+		after: func(d time.Duration, f func()) func() bool {
+			return time.AfterFunc(d, f).Stop
+		},
+	}
 }
 
-// track returns a context that is cancelled when cancelDevice is called for
-// deviceID, and a function to call when the request is finished.
-func (t *streamTable) track(parent context.Context, deviceID string) (context.Context, func()) {
+// arm (re)starts st's timer for its deadline. Caller holds t.mu.
+func (t *streamTable) arm(st *stream, now time.Time) {
+	if st.stop != nil {
+		st.stop()
+		st.stop = nil
+	}
+	if st.deadline.IsZero() {
+		return
+	}
+	d := st.deadline.Sub(now)
+	if d <= 0 {
+		st.cancel()
+		return
+	}
+	st.stop = t.after(d, st.cancel)
+}
+
+// track returns a context that is cancelled when the device's streams are
+// cancelled, or at deadline (zero: none), and a function to call when the
+// request is finished.
+func (t *streamTable) track(parent context.Context, deviceID, ip, network string, deadline, now time.Time) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(parent)
+	st := &stream{cancel: cancel, ip: ip, network: network, deadline: deadline}
 	t.mu.Lock()
+	t.arm(st, now)
 	id := t.next
 	t.next++
 	m := t.byDevice[deviceID]
 	if m == nil {
-		m = map[uint64]context.CancelFunc{}
+		m = map[uint64]*stream{}
 		t.byDevice[deviceID] = m
 	}
-	m[id] = cancel
+	m[id] = st
 	t.mu.Unlock()
 	return ctx, func() {
 		t.mu.Lock()
@@ -158,6 +329,9 @@ func (t *streamTable) track(parent context.Context, deviceID string) (context.Co
 				delete(t.byDevice, deviceID)
 			}
 		}
+		if st.stop != nil {
+			st.stop()
+		}
 		t.mu.Unlock()
 		cancel()
 	}
@@ -166,10 +340,55 @@ func (t *streamTable) track(parent context.Context, deviceID string) (context.Co
 func (t *streamTable) cancelDevice(deviceID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for _, cancel := range t.byDevice[deviceID] {
-		cancel()
+	for _, st := range t.byDevice[deviceID] {
+		st.cancel()
 	}
 	delete(t.byDevice, deviceID)
+}
+
+// cancelDeviceNetworksExcept closes a device's streams bound to a network
+// not in keep.
+func (t *streamTable) cancelDeviceNetworksExcept(deviceID string, keep map[string]bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id, st := range t.byDevice[deviceID] {
+		if st.network != "" && !keep[st.network] {
+			st.cancel()
+			delete(t.byDevice[deviceID], id)
+		}
+	}
+}
+
+// devices lists the devices with open streams.
+func (t *streamTable) devices() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, 0, len(t.byDevice))
+	for d := range t.byDevice {
+		out = append(out, d)
+	}
+	return out
+}
+
+// recheck re-evaluates each of a device's open streams: check reports
+// whether the stream's client address is still allowed and the deadline it must now
+// end by (zero: none). Disallowed streams are closed; others keep the
+// earlier of their old and new deadlines.
+func (t *streamTable) recheck(deviceID string, now time.Time, check func(ip string) (bool, time.Time)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id, st := range t.byDevice[deviceID] {
+		ok, deadline := check(st.ip)
+		if !ok {
+			st.cancel()
+			delete(t.byDevice[deviceID], id)
+			continue
+		}
+		if !deadline.IsZero() && (st.deadline.IsZero() || deadline.Before(st.deadline)) {
+			st.deadline = deadline
+			t.arm(st, now)
+		}
+	}
 }
 
 // challengeTable holds outstanding single-use challenges.

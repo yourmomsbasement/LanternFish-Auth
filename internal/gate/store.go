@@ -23,13 +23,65 @@ type Device struct {
 	EnrolledFrom string     `json:"enrolled_from"`
 	LastAuthAt   *time.Time `json:"last_auth_at,omitempty"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+	// SubjectID is the device's owner; ProfileID its assigned policy profile
+	// ("" uses the global policy).
+	SubjectID string `json:"subject_id,omitempty"`
+	ProfileID string `json:"profile_id,omitempty"`
+	// Networks are the networks this device is approved to use, newest last.
+	Networks []NetworkApproval `json:"networks,omitempty"`
 }
 
 func (d *Device) Active() bool { return d != nil && d.RevokedAt == nil }
 
+// NetworkApproval lets a device use a network (an address, or the prefix
+// around it, depending on the policy that approved it) until ExpiresAt.
+type NetworkApproval struct {
+	ID            string    `json:"id"`
+	Network       string    `json:"network"`
+	Method        string    `json:"method"` // "enrollment" or "key_proof"
+	ApprovedAt    time.Time `json:"approved_at"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	PolicyVersion int       `json:"policy_version"`
+}
+
+// Subject owns devices (and, later, authenticators). Tickets are bound to one.
+type Subject struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Role      string    `json:"role"`   // "owner" or "admin"
+	Status    string    `json:"status"` // "active" or "disabled"
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Profile is a named policy that devices can be assigned to.
+type Profile struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	CreatedAt     time.Time `json:"created_at"`
+	PolicyVersion int       `json:"policy_version"`
+}
+
+// PolicyRecord is one published, immutable policy version. Scope is "global"
+// or a profile ID.
+type PolicyRecord struct {
+	Version     int       `json:"version"`
+	Scope       string    `json:"scope"`
+	Policy      Policy    `json:"policy"`
+	Editor      string    `json:"editor"`
+	Reason      string    `json:"reason"`
+	PublishedAt time.Time `json:"published_at"`
+}
+
+const (
+	defaultSubjectID = "sub_default"
+	scopeGlobal      = "global"
+)
+
 // Ticket is a pending one-time enrollment ticket. Only its hash is stored.
 type Ticket struct {
 	ID        string    `json:"id"`
+	SubjectID string    `json:"subject_id,omitempty"`
+	ProfileID string    `json:"profile_id,omitempty"`
 	Hash      string    `json:"hash"`
 	Platform  string    `json:"platform"`
 	Label     string    `json:"label"`
@@ -59,7 +111,17 @@ type storeData struct {
 	Devices           map[string]*Device   `json:"devices"`
 	Tickets           map[string]*Ticket   `json:"tickets"`
 	AdminKeys         map[string]*AdminKey `json:"admin_keys"`
+
+	// Schema 2: owners, profiles and versioned access policies.
+	Subjects            map[string]*Subject `json:"subjects,omitempty"`
+	Profiles            map[string]*Profile `json:"profiles,omitempty"`
+	GlobalPolicyVersion int                 `json:"global_policy_version,omitempty"`
+	LastPolicyVersion   int                 `json:"last_policy_version,omitempty"`
+	PolicyHistory       []PolicyRecord      `json:"policy_history,omitempty"`
 }
+
+// maxPolicyHistory bounds stored policy versions; the ones in use are always kept.
+const maxPolicyHistory = 500
 
 // Store is the Gate's data file. It holds no usable secrets in the clear:
 // public keys, hashes, and values sealed under the master key.
@@ -130,6 +192,89 @@ func (s *Store) init() {
 	if s.data.AdminKeys == nil {
 		s.data.AdminKeys = map[string]*AdminKey{}
 	}
+	if s.data.Subjects == nil {
+		s.data.Subjects = map[string]*Subject{}
+	}
+	if s.data.Profiles == nil {
+		s.data.Profiles = map[string]*Profile{}
+	}
+}
+
+// Migrate brings a data file to schema 2: a default owner for existing
+// devices and tickets, and the legacy policy (sessions of legacyTTL, no
+// network binding, no schedule) as the first global policy, so upgrading
+// changes no behaviour until an administrator publishes a policy.
+func (s *Store) Migrate(now time.Time, legacyTTL time.Duration) error {
+	needed := false
+	s.View(func(d *storeData) {
+		needed = d.Version < 2 || d.GlobalPolicyVersion == 0 || d.Subjects[defaultSubjectID] == nil
+	})
+	if !needed {
+		return nil
+	}
+	return s.Update(func(d *storeData) error {
+		if d.Subjects[defaultSubjectID] == nil {
+			d.Subjects[defaultSubjectID] = &Subject{ID: defaultSubjectID, Name: "Default owner", Role: "owner",
+				Status: "active", CreatedAt: now}
+		}
+		for _, dev := range d.Devices {
+			if dev.SubjectID == "" {
+				dev.SubjectID = defaultSubjectID
+			}
+		}
+		for _, t := range d.Tickets {
+			if t.SubjectID == "" {
+				t.SubjectID = defaultSubjectID
+			}
+		}
+		if d.GlobalPolicyVersion == 0 {
+			d.publish(scopeGlobal, LegacyPolicy(legacyTTL), "migration", "behaviour before access policies", now)
+		}
+		d.Version = 2
+		return nil
+	})
+}
+
+// publish records a new immutable policy version for scope and makes it
+// current. The caller has validated p.
+func (d *storeData) publish(scope string, p Policy, editor, reason string, now time.Time) PolicyRecord {
+	d.LastPolicyVersion++
+	rec := PolicyRecord{Version: d.LastPolicyVersion, Scope: scope, Policy: p, Editor: editor, Reason: reason, PublishedAt: now}
+	d.PolicyHistory = append(d.PolicyHistory, rec)
+	if scope == scopeGlobal {
+		d.GlobalPolicyVersion = rec.Version
+	} else if prof := d.Profiles[scope]; prof != nil {
+		prof.PolicyVersion = rec.Version
+	}
+	// Trim old versions, never one that is in use.
+	for len(d.PolicyHistory) > maxPolicyHistory {
+		inUse := map[int]bool{d.GlobalPolicyVersion: true}
+		for _, p := range d.Profiles {
+			inUse[p.PolicyVersion] = true
+		}
+		trimmed := false
+		for i, r := range d.PolicyHistory {
+			if !inUse[r.Version] {
+				d.PolicyHistory = append(d.PolicyHistory[:i:i], d.PolicyHistory[i+1:]...)
+				trimmed = true
+				break
+			}
+		}
+		if !trimmed {
+			break
+		}
+	}
+	return rec
+}
+
+// policyRecord returns the stored policy version, if any.
+func (d *storeData) policyRecord(version int) (PolicyRecord, bool) {
+	for i := len(d.PolicyHistory) - 1; i >= 0; i-- {
+		if d.PolicyHistory[i].Version == version {
+			return d.PolicyHistory[i], true
+		}
+	}
+	return PolicyRecord{}, false
 }
 
 // View runs fn with the store locked for reading. fn must not modify d or
@@ -180,6 +325,22 @@ func (d *storeData) clone() storeData {
 		x := *v
 		c.AdminKeys[k] = &x
 	}
+	c.Subjects = make(map[string]*Subject, len(d.Subjects))
+	for k, v := range d.Subjects {
+		x := *v
+		c.Subjects[k] = &x
+	}
+	c.Profiles = make(map[string]*Profile, len(d.Profiles))
+	for k, v := range d.Profiles {
+		x := *v
+		c.Profiles[k] = &x
+	}
+	// Slices are copied too: a device's networks are edited by appending
+	// and removing, and policy history is appended to.
+	for _, dev := range c.Devices {
+		dev.Networks = append([]NetworkApproval(nil), dev.Networks...)
+	}
+	c.PolicyHistory = append([]PolicyRecord(nil), d.PolicyHistory...)
 	return c
 }
 

@@ -9,7 +9,7 @@ device and never leaves it.
   authenticates with an mTLS client certificate that the Gate issues for that
   key.
 * **Browsers, webOS, Tizen:** the key is a non-extractable WebCrypto key. The
-  device signs a single-use challenge to get a 15-minute session.
+  device signs a single-use challenge to get a short-lived session.
 * **Roku:** an HMAC secret, sealed on the Gate under a master key that is
   kept outside the data file.
 * **Builds are not credentials.** A package carries only the server URL, a key
@@ -93,10 +93,30 @@ curl -X POST https://your.host/_lanternfish/admin/v1/tickets \
 
 Open `https://your.host/` in the browser, paste the `ticket` when asked, and
 you're in. The browser keeps a non-extractable key and signs in again on its
-own after that. While the Jellyfin web app is open, its 15-minute Gate session
-renews in the background. The renewal script is added to the web client by
+own after that. While the Jellyfin web app is open, its Gate session (15
+minutes by default, or whatever the access policy sets) renews in the
+background. The renewal script is added to the web client by
 the Jellyfin plugin, or by the Gate when the plugin doesn't (see
 [Session renewal](docs/PROTOCOL.md#session-renewal-in-the-web-client)).
+
+### Access policy
+
+Out of the box the Gate behaves as before: 15-minute sessions, from any
+network, at any time. To switch to the recommended policy (5-minute sessions
+bound to the network they were issued on, with a new network approved by a
+fresh key signature), fetch it, look at what it would do, and publish it:
+
+```sh
+H='Authorization: Bearer lfa_…'; A=https://your.host/_lanternfish/admin/v2
+curl -s -H "$H" $A/policy/recommended > rec.json
+curl -s -H "$H" $A/policy | jq .global.version          # current version, e.g. 1
+jq '{policy: .policy}' rec.json | curl -s -H "$H" -X POST $A/policy/preview -d @-
+jq '{expected_version: 1, reason: "recommended policy", policy: .policy}' rec.json \
+  | curl -s -H "$H" -X PUT $A/policy -d @-
+```
+
+Schedules, blackouts, per-device profiles and owners are described in
+[Access policy](docs/PROTOCOL.md#access-policy).
 
 ## Hardening checklist
 

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -111,6 +112,9 @@ type Gate struct {
 	sessions   *sessionTable
 	challenges *challengeTable
 	streams    *streamTable
+	grants     *grantTable
+	policies   atomic.Pointer[policySet]
+	policyMu   sync.Mutex // serialises policy publishes with their reload
 	proxy      *httputil.ReverseProxy
 
 	// lastAuth holds each device's latest sign-in time; it is saved to the
@@ -169,6 +173,13 @@ func New(cfg Config) (*Gate, error) {
 		sessions:   newSessionTable(maxSessionsPerDevice),
 		challenges: newChallengeTable(10000, 32),
 		streams:    newStreamTable(),
+		grants:     newGrantTable(),
+	}
+	if err := store.Migrate(cfg.Now(), cfg.SessionTTL); err != nil {
+		return nil, fmt.Errorf("upgrade data file: %w", err)
+	}
+	if err := g.reloadPolicies(); err != nil {
+		return nil, err
 	}
 	g.proxy = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -233,6 +244,7 @@ func (g *Gate) routes() http.Handler {
 	mux.HandleFunc("DELETE /_lanternfish/admin/v1/tickets/{id}", g.admin(g.handleDeleteTicket))
 	mux.HandleFunc("GET /_lanternfish/admin/v1/devices", g.admin(g.handleListDevices))
 	mux.HandleFunc("POST /_lanternfish/admin/v1/devices/{id}/revoke", g.admin(g.handleRevokeDevice))
+	g.adminV2Routes(mux)
 
 	mux.HandleFunc("GET /_lanternfish/{$}", g.serveStatic("index.html"))
 	mux.HandleFunc("GET /_lanternfish/gate-client.js", g.serveStatic("gate-client.js"))
@@ -258,30 +270,6 @@ const (
 	authHeader      = "header" // an app sending X-Lanternfish-Session
 )
 
-// authenticate returns the active device behind a request, if any, and how it
-// authenticated.
-func (g *Gate) authenticate(r *http.Request) (*Device, string) {
-	if r.TLS != nil && len(r.TLS.VerifiedChains) > 0 && len(r.TLS.VerifiedChains[0]) > 0 {
-		leaf := r.TLS.VerifiedChains[0][0]
-		if dev := g.activeDevice(leaf.Subject.CommonName); dev != nil && dev.Kind == KindECDSA &&
-			string(dev.PublicKey) == string(leaf.RawSubjectPublicKeyInfo) {
-			return dev, authCertificate
-		}
-	}
-	token, how := r.Header.Get(sessionHeader), authHeader
-	if token == "" {
-		if c, err := r.Cookie(sessionCookie); err == nil {
-			token, how = c.Value, authCookie
-		}
-	}
-	if deviceID, ok := g.sessions.lookup(token, g.cfg.Now()); ok {
-		if dev := g.activeDevice(deviceID); dev != nil {
-			return dev, how
-		}
-	}
-	return nil, ""
-}
-
 // activeDevice returns a copy of an active device, or nil.
 func (g *Gate) activeDevice(id string) *Device {
 	if _, revoked := g.unsavedRevocations.Load(id); revoked {
@@ -298,15 +286,11 @@ func (g *Gate) activeDevice(id string) *Device {
 }
 
 func (g *Gate) serveProxy(w http.ResponseWriter, r *http.Request) {
-	dev, how := g.authenticate(r)
-	if dev == nil {
-		if r.Method == http.MethodGet && acceptsHTML(r) {
-			http.Redirect(w, r, pathPrefix+"?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
-			return
-		}
-		writeError(w, http.StatusUnauthorized, "lanternfish_auth_required")
+	auth := g.authorizeRequest(w, r)
+	if auth == nil {
 		return
 	}
+	dev, how := auth.dev, auth.how
 
 	// Gate credentials stay at the Gate; Jellyfin only learns who it is.
 	r.Header.Del(sessionHeader)
@@ -320,12 +304,12 @@ func (g *Gate) serveProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// SECURITY: authentication is checked once per request, so a WebSocket or
-	// a long stream would outlive a revocation. Tie the request to the device
-	// so revoking it also closes those connections.
-	ctx, done := g.streams.track(r.Context(), dev.ID)
+	// SECURITY: authorization is checked once per request, so a WebSocket or
+	// a long stream would outlive a revocation or a policy change. Tie the
+	// request to the device (and its network and deadline) so those close it.
+	ctx, done := g.streams.track(r.Context(), dev.ID, clientIP(r), auth.network, auth.streamDeadline(), g.cfg.Now())
 	defer done()
-	if g.activeDevice(dev.ID) == nil { // revoked between authenticate and track
+	if g.activeDevice(dev.ID) == nil { // revoked between authorizing and tracking
 		writeError(w, http.StatusUnauthorized, "lanternfish_auth_required")
 		return
 	}

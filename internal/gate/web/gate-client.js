@@ -61,6 +61,7 @@
         if (!res.ok) {
           var err = new Error(data.error || "HTTP " + res.status);
           err.status = res.status;
+          err.reason = data.reason || "";
           throw err;
         }
         return data;
@@ -114,7 +115,9 @@
     var renewAt = 0;
     function schedule(expiresAt) {
       var life = Date.parse(expiresAt) - Date.now();
-      var wait = Math.max(30000, life * 2 / 3);
+      // Renew at about 2/3 of the session's life, jittered so tabs and
+      // devices don't all renew in the same second.
+      var wait = Math.max(30000, life * (0.6 + Math.random() * 0.07));
       renewAt = Date.now() + wait;
       clearTimeout(timer);
       timer = setTimeout(renew, wait);
@@ -129,9 +132,15 @@
         inflight = false;
         if (err.status === 401 || err.status === 0) {
           location.assign("/_lanternfish/?next=" + encodeURIComponent(location.pathname + location.search + location.hash));
+        } else if (err.status === 403) {
+          // The policy says no (outside the schedule, network not allowed,
+          // owner disabled). Retrying won't change that, and navigating away
+          // would stop playback that is allowed to finish; the next page
+          // request goes to the sign-in page, which shows why.
+          clearTimeout(timer);
         } else {
           clearTimeout(timer);
-          timer = setTimeout(renew, 30000);
+          timer = setTimeout(renew, 20000 + Math.random() * 20000);
         }
       });
     }
@@ -139,6 +148,9 @@
     document.addEventListener("visibilitychange", function () {
       if (document.visibilityState === "visible" && Date.now() >= renewAt) renew();
     });
+    // A new network (Wi-Fi to mobile data) invalidates network-bound
+    // sessions; sign in again from it straight away.
+    window.addEventListener("online", function () { renew(); });
     renew();
   }
 

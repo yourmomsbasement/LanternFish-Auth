@@ -20,6 +20,17 @@
     }
   }
 
+  var REASONS = {
+    outside_schedule: "Access isn't allowed at this time.",
+    owner_disabled: "Access for this device's owner is turned off.",
+    network_changed: "This device isn't allowed to sign in from this network.",
+    network_not_approved: "This device isn't allowed to sign in from this network.",
+    credential_mismatch: "This connection presented two different devices' credentials.",
+    device_revoked: "This device has been revoked.",
+    could_not_save_network_approval: "The Gate couldn't record this network. Try again in a minute."
+  };
+  function reasonText(code) { return REASONS[code] || ""; }
+
   function showEnroll(message) {
     status.textContent = message;
     form.hidden = false;
@@ -42,8 +53,12 @@
       showEnroll("This browser isn't enrolled yet. Paste an enrollment ticket from Lanternfish Builder.");
       return;
     }
+    var why = reasonText(new URLSearchParams(location.search).get("reason") || "");
+    if (why) status.textContent = why + " Checking again…";
     return signIn().catch(function (err) {
-      if (err.status === 401) {
+      if (err.status === 403 || err.status === 503) {
+        status.textContent = (reasonText(err.reason) || "Access denied.") + " (" + (err.reason || err.message) + ")";
+      } else if (err.status === 401) {
         showEnroll("This browser's key was not accepted. It may have been revoked. Enroll again with a new ticket.");
       } else {
         status.textContent = "Sign-in failed: " + err.message;
