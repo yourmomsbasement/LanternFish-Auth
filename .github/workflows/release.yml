@@ -1,9 +1,12 @@
 name: Release
 
-# Push a tag like v0.1.0 (or v0.2.0-rc1 for a pre-release) to publish.
+# Either push a tag like v0.1.0 (v0.2.0-rc1 for a pre-release), or publish a
+# release with a v* tag on GitHub; this builds the files and attaches them.
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -146,5 +149,13 @@ jobs:
           **Install or update the plugin from inside Jellyfin:** Dashboard → Plugins → Repositories → add
           \`https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/manifest.json\`
           NOTES
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "Lanternfish $GITHUB_REF_NAME" --notes-file notes.md --verify-tag $prerelease
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # Release made on GitHub (or a re-run): attach the files to it.
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            if [ -z "$(gh release view "$GITHUB_REF_NAME" --json body --jq .body)" ]; then
+              gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "Lanternfish $GITHUB_REF_NAME" --notes-file notes.md --verify-tag $prerelease
+          fi

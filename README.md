@@ -125,7 +125,8 @@ manual; see [jellyfin-plugin/README.md](jellyfin-plugin/README.md).
 
 ## Releases
 
-Push a tag like `v0.2.0` (or `v0.2.0-rc1` for a pre-release) and the
+Push a tag like `v0.2.0` (or `v0.2.0-rc1` for a pre-release), or publish a
+release with a `v*` tag on GitHub, and the
 [release workflow](.github/workflows/release.yml) does the rest. It runs CI,
 builds the Gate for Linux (amd64, arm64) and Windows, builds the plugin and
 its repository manifest, and publishes everything with `SHA256SUMS`.
