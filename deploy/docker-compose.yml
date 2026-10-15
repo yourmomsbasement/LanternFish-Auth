@@ -24,6 +24,11 @@ services:
       LANTERNFISH_TLS_CERT: /certs/fullchain.pem
       LANTERNFISH_TLS_KEY: /certs/privkey.pem
       # LANTERNFISH_ALERT_WEBHOOK: https://discord.com/api/webhooks/...
+      # SECURITY: narrow the admin API to the Builder's address. The default
+      # allows all private ranges, and Docker's userland proxy (used, for
+      # example, for IPv6 or hairpin traffic) makes outside clients appear to
+      # come from the bridge gateway (172.x), which is one of them.
+      # LANTERNFISH_ADMIN_ALLOW: 192.168.1.10
     secrets:
       - master_key
     volumes:

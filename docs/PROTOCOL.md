@@ -139,6 +139,8 @@ Set-Cookie: lf_session=lfs_…; Path=/; Secure; HttpOnly; SameSite=Lax
   first time anyone tries to use it, whether that attempt succeeds or fails.
 * The Gate issues challenges for unknown device IDs as well, so this endpoint
   cannot be used to find out which devices exist.
+* Each source (an IPv4 address, or an IPv6 /64) may hold at most 32
+  outstanding challenges. Past that the Gate answers `429` with `Retry-After`.
 * Clients renew by repeating the exchange before `expires_at`. Renewing at
   about two-thirds of the lifetime works well.
 * `POST /_lanternfish/v1/logout` ends the current session.
@@ -158,6 +160,9 @@ from the request. It replaces any incoming `X-Lanternfish-Device` header with
 the authenticated device ID, and any incoming `X-Lanternfish-Auth` with how
 the request authenticated: `certificate`, `cookie` (a browser) or `header`
 (an app sending `X-Lanternfish-Session`).
+
+Authentication is checked on every request. Revoking a device also closes the
+requests it still has open, such as WebSockets and media streams.
 
 The Gate then **signs** the forwarded request (see *Signed requests to
 Jellyfin* below), so Jellyfin can refuse anything that did not come through
@@ -248,8 +253,8 @@ each request single-use.
 
 Exceptions and failure modes:
 
-* Unsigned `GET`/`HEAD` requests to `/health` from loopback are allowed by
-  default, for Docker health checks. This can be turned off.
+* Unsigned `GET`/`HEAD` requests to exactly `/health` from loopback are
+  allowed by default, for Docker health checks. This can be turned off.
 * **No key configured: the plugin does not enforce.** It logs a warning, so
   installing the plugin can't lock you out before the key is pasted in.
 * **Unparseable key: the plugin refuses everything** (`503`). A typo must not

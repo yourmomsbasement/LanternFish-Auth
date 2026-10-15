@@ -73,7 +73,7 @@ You can also write the settings file before the first start:
 |---|---|---|
 | Gate public keys | empty | One base64 key per line. Empty means not enforcing. When rotating, add the new key before removing the old one. |
 | Allowed clock difference | 30 s | Keep the Gate and Jellyfin on NTP. |
-| Allow unsigned health checks from this machine | on | Lets `GET /health` from loopback through, for the Docker health check. |
+| Allow unsigned health checks from this machine | on | Lets `GET /health` (that exact path) from loopback through, for the Docker health check. |
 | Keep browser sessions alive in the web client | on | Adds the Gate's renewal script to the web client for browsers, so their 15-minute Gate session renews in the background. When off, the Gate adds the script itself. |
 
 An unparseable key makes the plugin **refuse every request** (`503`) rather

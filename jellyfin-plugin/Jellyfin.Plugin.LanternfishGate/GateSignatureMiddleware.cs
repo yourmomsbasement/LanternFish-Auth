@@ -128,7 +128,9 @@ public sealed class GateSignatureMiddleware
         return (HttpMethods.IsGet(request.Method) || HttpMethods.IsHead(request.Method))
             && remote is not null
             && IPAddress.IsLoopback(remote)
-            && (request.PathBase + request.Path).Value?.EndsWith("/health", StringComparison.OrdinalIgnoreCase) == true;
+            // SECURITY: exactly /health, not any path ending in it, so the
+            // exemption can't reach another endpoint (e.g. /Foo/health).
+            && string.Equals(request.Path.Value, "/health", StringComparison.OrdinalIgnoreCase);
     }
 
     private static Task Reject(HttpContext context, int status, string reason)

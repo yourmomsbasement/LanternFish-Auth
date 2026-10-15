@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -73,38 +74,104 @@ func (t *sessionTable) prune(now time.Time) {
 	}
 }
 
+// streamTable tracks in-flight proxied requests per device, so revoking a
+// device can cancel them (open WebSockets and media streams included).
+type streamTable struct {
+	mu       sync.Mutex
+	next     uint64
+	byDevice map[string]map[uint64]context.CancelFunc
+}
+
+func newStreamTable() *streamTable {
+	return &streamTable{byDevice: map[string]map[uint64]context.CancelFunc{}}
+}
+
+// track returns a context that is cancelled when cancelDevice is called for
+// deviceID, and a function to call when the request is finished.
+func (t *streamTable) track(parent context.Context, deviceID string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	t.mu.Lock()
+	id := t.next
+	t.next++
+	m := t.byDevice[deviceID]
+	if m == nil {
+		m = map[uint64]context.CancelFunc{}
+		t.byDevice[deviceID] = m
+	}
+	m[id] = cancel
+	t.mu.Unlock()
+	return ctx, func() {
+		t.mu.Lock()
+		if m := t.byDevice[deviceID]; m != nil {
+			delete(m, id)
+			if len(m) == 0 {
+				delete(t.byDevice, deviceID)
+			}
+		}
+		t.mu.Unlock()
+		cancel()
+	}
+}
+
+func (t *streamTable) cancelDevice(deviceID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, cancel := range t.byDevice[deviceID] {
+		cancel()
+	}
+	delete(t.byDevice, deviceID)
+}
+
 // challengeTable holds outstanding single-use challenges.
+//
+// SECURITY: challenges are handed out without authentication, so besides the
+// global cap each source (an IPv4 address, or an IPv6 /64) may hold only
+// maxPerSource at once. Without that, one client could fill the whole table
+// and lock every device out of signing in.
 type challengeTable struct {
-	mu    sync.Mutex
-	items map[string]challenge
-	max   int
+	mu           sync.Mutex
+	items        map[string]challenge
+	bySource     map[string]int
+	max          int
+	maxPerSource int
 }
 
 type challenge struct {
 	deviceID string
+	source   string
 	expires  time.Time
 }
 
-func newChallengeTable(max int) *challengeTable {
-	return &challengeTable{items: map[string]challenge{}, max: max}
+func newChallengeTable(max, maxPerSource int) *challengeTable {
+	return &challengeTable{items: map[string]challenge{}, bySource: map[string]int{}, max: max, maxPerSource: maxPerSource}
 }
 
-func (t *challengeTable) issue(deviceID string, now time.Time, ttl time.Duration) (string, time.Time, bool) {
+func (t *challengeTable) drop(value string, c challenge) {
+	delete(t.items, value)
+	if n := t.bySource[c.source] - 1; n > 0 {
+		t.bySource[c.source] = n
+	} else {
+		delete(t.bySource, c.source)
+	}
+}
+
+func (t *challengeTable) issue(deviceID, source string, now time.Time, ttl time.Duration) (string, time.Time, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.items) >= t.max {
+	if len(t.items) >= t.max || t.bySource[source] >= t.maxPerSource {
 		for k, c := range t.items {
 			if !now.Before(c.expires) {
-				delete(t.items, k)
+				t.drop(k, c)
 			}
 		}
-		if len(t.items) >= t.max {
+		if len(t.items) >= t.max || t.bySource[source] >= t.maxPerSource {
 			return "", time.Time{}, false
 		}
 	}
 	value := encodeB64(randomBytes(32))
 	exp := now.Add(ttl)
-	t.items[value] = challenge{deviceID: deviceID, expires: exp}
+	t.items[value] = challenge{deviceID: deviceID, source: source, expires: exp}
+	t.bySource[source]++
 	return value, exp, true
 }
 
@@ -116,8 +183,22 @@ func (t *challengeTable) consume(value, deviceID string, now time.Time) bool {
 	if !ok {
 		return false
 	}
-	delete(t.items, value)
+	t.drop(value, c)
 	return c.deviceID == deviceID && now.Before(c.expires)
+}
+
+// sourceKey groups addresses one client is likely to control: an IPv4
+// address, or the /64 an IPv6 address is in.
+func sourceKey(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	a = a.Unmap()
+	if a.Is6() {
+		return netip.PrefixFrom(a, 64).Masked().String()
+	}
+	return a.String()
 }
 
 // failureLimiter blocks an IP after too many failed credentials in a window.
@@ -222,7 +303,12 @@ func (a *alerter) send(msg string) {
 		return
 	}
 	go func() {
-		body, _ := json.Marshal(map[string]string{"content": msg})
+		// SECURITY: device names come from whoever enrolls. Allow no
+		// mentions, so a name like "@everyone" can't ping the whole server.
+		body, _ := json.Marshal(map[string]any{
+			"content":          msg,
+			"allowed_mentions": map[string]any{"parse": []string{}},
+		})
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url, bytes.NewReader(body))
