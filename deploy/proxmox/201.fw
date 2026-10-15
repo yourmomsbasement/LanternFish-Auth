@@ -1,0 +1,13 @@
+# Proxmox firewall for CT 201 (lanternfish-gate): /etc/pve/firewall/201.fw
+# Each NIC also needs firewall=1 in the container's network settings.
+# Adjust 192.168.1.10 to the PC you administer from.
+
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: ACCEPT
+
+[RULES]
+IN ACCEPT -i net0 -p tcp -dport 443 -log nolog # HTTPS: the only public entry point
+IN ACCEPT -i net0 -source 192.168.1.10 -p tcp -dport 22 -log nolog # SSH from the admin PC
+IN ACCEPT -i net0 -p icmp -log nolog # ping

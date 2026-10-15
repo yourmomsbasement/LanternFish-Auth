@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Lanternfish Gate</title>
+</head>
+<body>
+    <div id="LanternfishGateConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox,emby-textarea">
+        <div data-role="content">
+            <div class="content-primary">
+                <h2>Lanternfish Gate</h2>
+                <p>
+                    Once a key is saved, Jellyfin refuses every request that Lanternfish Gate did not forward and sign,
+                    including requests made straight to this server's port.
+                </p>
+                <form id="LanternfishGateConfigForm">
+                    <div class="inputContainer">
+                        <textarea is="emby-textarea" id="GatePublicKeys" label="Gate public keys" rows="3" spellcheck="false"></textarea>
+                        <div class="fieldDescription">
+                            Output of <code>lanternfish-gate upstream-key</code>. One key per line; add the new key before
+                            removing the old one when rotating. Leave empty to stop enforcing.
+                        </div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="MaxClockSkewSeconds" min="5" max="300" label="Allowed clock difference (seconds)">
+                        <div class="fieldDescription">How far the Gate's clock may be from this server's. Keep both on NTP.</div>
+                    </div>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
+                            <input is="emby-checkbox" type="checkbox" id="AllowLoopbackHealthCheck">
+                            <span>Allow unsigned health checks from this machine</span>
+                        </label>
+                        <div class="fieldDescription checkboxFieldDescription">Lets Docker's <code>/health</code> check keep working.</div>
+                    </div>
+                    <p id="LanternfishGateError" style="color: #cc4444;" hidden></p>
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <script type="text/javascript">
+            (function () {
+                var pluginId = '2ffdcd88-4b14-41c3-b3af-a2bdffb9506c';
+                var page = document.querySelector('#LanternfishGateConfigPage');
+                var form = document.querySelector('#LanternfishGateConfigForm');
+                var error = document.querySelector('#LanternfishGateError');
+
+                // A P-256 SubjectPublicKeyInfo is always 91 bytes.
+                function badKeys(text) {
+                    return text.split(/[\s,]+/).filter(Boolean).filter(function (k) {
+                        try { return atob(k).length !== 91; } catch (e) { return true; }
+                    });
+                }
+
+                page.addEventListener('pageshow', function () {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        page.querySelector('#GatePublicKeys').value = config.GatePublicKeys || '';
+                        page.querySelector('#MaxClockSkewSeconds').value = config.MaxClockSkewSeconds;
+                        page.querySelector('#AllowLoopbackHealthCheck').checked = config.AllowLoopbackHealthCheck;
+                        Dashboard.hideLoadingMsg();
+                    });
+                });
+
+                form.addEventListener('submit', function (e) {
+                    e.preventDefault();
+                    var keys = page.querySelector('#GatePublicKeys').value.trim();
+                    var bad = badKeys(keys);
+                    if (bad.length) {
+                        error.textContent = 'Not a valid Gate key: ' + bad[0].slice(0, 24) + '…';
+                        error.hidden = false;
+                        return false;
+                    }
+                    error.hidden = true;
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        config.GatePublicKeys = keys;
+                        config.MaxClockSkewSeconds = parseInt(page.querySelector('#MaxClockSkewSeconds').value, 10) || 30;
+                        config.AllowLoopbackHealthCheck = page.querySelector('#AllowLoopbackHealthCheck').checked;
+                        ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
+                            Dashboard.processPluginConfigurationUpdateResult(result);
+                        });
+                    });
+                    return false;
+                });
+            })();
+        </script>
+    </div>
+</body>
+</html>

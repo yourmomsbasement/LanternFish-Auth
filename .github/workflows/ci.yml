@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Gate (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "Not gofmt'd:"; echo "$unformatted"; exit 1; fi
+      - name: go vet (linux)
+        run: go vet ./...
+      - name: go vet (windows)
+        run: GOOS=windows go vet ./...
+      - name: go test
+        run: go test -race -count=1 ./...
+
+  plugin:
+    name: Jellyfin plugin (.NET)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: dotnet test
+        run: dotnet test jellyfin-plugin/Jellyfin.Plugin.LanternfishGate.sln -c Release
+
+  deploy-scripts:
+    name: Deploy scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck deploy/systemd/*.sh deploy/systemd/lanternfish-gatectl
+      - name: systemd unit
+        run: |
+          sudo touch /usr/local/bin/lanternfish-gate && sudo chmod +x /usr/local/bin/lanternfish-gate
+          systemd-analyze verify deploy/systemd/lanternfish-gate.service

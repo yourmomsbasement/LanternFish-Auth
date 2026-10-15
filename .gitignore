@@ -1,0 +1,8 @@
+/data/
+/deploy/secrets/
+/lanternfish-gate
+/lanternfish-gate.exe
+*.lock
+bin/
+obj/
+*.user

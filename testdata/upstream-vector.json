@@ -1,0 +1,9 @@
+{
+  "public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHHQEps1TzQXk4W0zVzJWk3CFxlIzWMR9SEy2/5LHy3z0TVTbgXe+EiS02ryK59KJZ/+fhMyoU6+R8NQiTc+mFg==",
+  "method": "GET",
+  "target": "/Videos/1a2b/stream.mp4?Static=true\u0026api_key=x%2By",
+  "timestamp": 1760000000,
+  "nonce": "bm9uY2UtdmFsdWUtMTIzNA",
+  "device_id": "dev_ExampleDevice01",
+  "signature": "baLeQxI3ob4pyVr76jcsTYK454Zj/mTnOrpIXnzFYhGt2hm6FK6dGDWRuPioT2M19oyj7AzTGPhNSmjIJgMAJw=="
+}
