@@ -7,9 +7,17 @@
 
   function nextPath() {
     var n = new URLSearchParams(location.search).get("next") || "/";
-    // Only same-origin paths: "/x", never "//host" or "/\host".
-    if (n.charAt(0) !== "/" || n.charAt(1) === "/" || n.charAt(1) === "\\") n = "/";
-    return n;
+    // SECURITY: only same-origin paths. Checking the string alone isn't
+    // enough: URL parsing drops tabs and newlines, so "/\t/evil.example"
+    // becomes "//evil.example". Resolve it the way the browser will.
+    if (n.charAt(0) !== "/") return "/";
+    try {
+      var u = new URL(n, location.origin);
+      if (u.origin !== location.origin) return "/";
+      return u.pathname + u.search + u.hash;
+    } catch (e) {
+      return "/";
+    }
   }
 
   function showEnroll(message) {

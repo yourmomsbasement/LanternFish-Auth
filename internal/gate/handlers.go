@@ -224,9 +224,10 @@ func (g *Gate) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Issued for unknown IDs too, so this can't be used to probe for devices.
-	value, exp, ok := g.challenges.issue(req.DeviceID, g.cfg.Now(), g.cfg.ChallengeTTL)
+	value, exp, ok := g.challenges.issue(req.DeviceID, sourceKey(clientIP(r)), g.cfg.Now(), g.cfg.ChallengeTTL)
 	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "too many outstanding challenges")
+		w.Header().Set("Retry-After", fmt.Sprint(int(g.cfg.ChallengeTTL.Seconds())))
+		writeError(w, http.StatusTooManyRequests, "too many outstanding challenges")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"challenge": value, "expires_at": exp.UTC()})
@@ -473,6 +474,7 @@ func (g *Gate) handleRevokeDevice(w http.ResponseWriter, r *http.Request, key *A
 		return
 	}
 	g.sessions.removeDevice(id)
+	g.streams.cancelDevice(id)
 	g.audit.write(now, "revoked", map[string]any{"device_id": id, "name": name, "admin_key": key.Name, "ip": clientIP(r)})
 	g.alerts.send(fmt.Sprintf("🔒 Device revoked on Lanternfish Gate: %q (%s, %s)", name, platform, id))
 	w.WriteHeader(http.StatusNoContent)

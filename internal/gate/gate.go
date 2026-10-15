@@ -3,6 +3,7 @@
 package gate
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/tls"
 	"encoding/base64"
@@ -101,6 +102,7 @@ type Gate struct {
 	limiter    *failureLimiter
 	sessions   *sessionTable
 	challenges *challengeTable
+	streams    *streamTable
 	proxy      *httputil.ReverseProxy
 	handler    http.Handler
 }
@@ -149,12 +151,20 @@ func New(cfg Config) (*Gate, error) {
 		alerts:     &alerter{url: cfg.AlertWebhook, client: &http.Client{Timeout: 10 * time.Second}},
 		limiter:    newFailureLimiter(cfg.FailureLimit, cfg.FailureWindow),
 		sessions:   newSessionTable(),
-		challenges: newChallengeTable(10000),
+		challenges: newChallengeTable(10000, 32),
+		streams:    newStreamTable(),
 	}
 	g.proxy = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(cfg.Upstream)
 			pr.SetXForwarded()
+			// SECURITY: set the identity headers on the outbound request here,
+			// after ReverseProxy has removed hop-by-hop headers. Set on the
+			// inbound request, a client could have them stripped by naming them
+			// in its own Connection header.
+			a, _ := pr.In.Context().Value(proxyAuthKey{}).(proxyAuth)
+			pr.Out.Header.Set(deviceHeader, a.deviceID)
+			pr.Out.Header.Set(authKindHeader, a.how)
 			g.prepareRenewal(pr.Out)
 			g.signUpstream(pr.Out)
 		},
@@ -163,7 +173,8 @@ func New(cfg Config) (*Gate, error) {
 			return g.injectRenewal(resp)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("proxy: %s %s: %v", r.Method, r.URL.Path, err)
+			// %q: the path is client-controlled and may hold newlines.
+			log.Printf("proxy: %s %q: %v", r.Method, r.URL.Path, err)
 			writeError(w, http.StatusBadGateway, "upstream unavailable")
 		},
 	}
@@ -276,6 +287,7 @@ func (g *Gate) serveProxy(w http.ResponseWriter, r *http.Request) {
 	// Gate credentials stay at the Gate; Jellyfin only learns who it is.
 	r.Header.Del(sessionHeader)
 	r.Header.Del(deviceHeader)
+	r.Header.Del(authKindHeader)
 	if cookies := r.Cookies(); len(cookies) > 0 {
 		r.Header.Del("Cookie")
 		for _, c := range cookies {
@@ -284,10 +296,23 @@ func (g *Gate) serveProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	r.Header.Set(deviceHeader, dev.ID)
-	r.Header.Set(authKindHeader, how)
-	g.proxy.ServeHTTP(w, r)
+	// SECURITY: authentication is checked once per request, so a WebSocket or
+	// a long stream would outlive a revocation. Tie the request to the device
+	// so revoking it also closes those connections.
+	ctx, done := g.streams.track(r.Context(), dev.ID)
+	defer done()
+	if g.activeDevice(dev.ID) == nil { // revoked between authenticate and track
+		writeError(w, http.StatusUnauthorized, "lanternfish_auth_required")
+		return
+	}
+	ctx = context.WithValue(ctx, proxyAuthKey{}, proxyAuth{deviceID: dev.ID, how: how})
+	g.proxy.ServeHTTP(w, r.WithContext(ctx))
 }
+
+// proxyAuth carries who a request authenticated as from serveProxy to Rewrite.
+type proxyAuth struct{ deviceID, how string }
+
+type proxyAuthKey struct{}
 
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
