@@ -19,6 +19,9 @@ import (
 	"github.com/yourmomsbasement/lanternfish-auth/internal/gate"
 )
 
+// version is set at release build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 const usage = `Usage:
   lanternfish-gate serve                     Run the Gate
   lanternfish-gate gen-master-key [flags]    Print a new master key
@@ -29,6 +32,7 @@ const usage = `Usage:
   lanternfish-gate admin-key revoke ID
   lanternfish-gate device-ca                 Print the device CA certificate
   lanternfish-gate upstream-key              Print the key for Jellyfin's Lanternfish plugin
+  lanternfish-gate version                   Print the version
 
 admin-key, device-ca and upstream-key read the data file directly; stop the Gate first.
 
@@ -67,6 +71,8 @@ func main() {
 		err = deviceCA()
 	case "upstream-key":
 		err = upstreamKey()
+	case "version", "--version":
+		fmt.Println(version)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -164,7 +170,7 @@ func serve() error {
 		defer cancel()
 		srv.Shutdown(shutdown)
 	}()
-	log.Printf("listening on %s, proxying to %s", srv.Addr, cfg.Upstream)
+	log.Printf("lanternfish-gate %s listening on %s, proxying to %s", version, srv.Addr, cfg.Upstream)
 	log.Printf("requests to Jellyfin are signed; Lanternfish plugin key: %s", g.UpstreamPublicKey())
 	adminNets := cfg.AdminAllow
 	if adminNets == nil {

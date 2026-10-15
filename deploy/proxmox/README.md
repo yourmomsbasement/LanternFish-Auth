@@ -33,9 +33,19 @@ The addresses below are examples. Replace `192.168.1.x`, `192.168.1.1` (your
 router), `192.168.1.10` (your admin PC) and `jellyfin.example.com`
 throughout.
 
-## 0. Build the two artifacts
+## 0. Get the two artifacts
 
-Do this on any machine with Go and the .NET 10 SDK, from this repository:
+The easiest way is to download them from the repository's **Releases** page:
+
+* `lanternfish-gate_<version>_linux_amd64.tar.gz`: the Gate binary, plus
+  this `deploy/` folder.
+* `jellyfin-plugin-lanternfish-gate_<version>.zip`: unzipped, it is already
+  the `LanternfishGate_<version>` folder that goes into Jellyfin's `plugins/`.
+
+Check them with `sha256sum -c SHA256SUMS --ignore-missing`. If you use the
+release files, read `plugin-out/` below as the unzipped plugin folder.
+
+Or build them yourself, on any machine with Go and the .NET 10 SDK:
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o lanternfish-gate ./cmd/lanternfish-gate
