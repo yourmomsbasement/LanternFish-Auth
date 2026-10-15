@@ -159,7 +159,9 @@ func New(cfg Config) (*Gate, error) {
 			g.signUpstream(pr.Out)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			resp.Header.Set("Strict-Transport-Security", hstsValue)
+			// The Gate sets HSTS on every response itself; drop Jellyfin's
+			// copy so the header isn't sent twice.
+			resp.Header.Del("Strict-Transport-Security")
 			return g.injectRenewal(resp)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
