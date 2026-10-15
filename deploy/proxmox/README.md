@@ -292,6 +292,25 @@ paste it in.
 
 ## 10. Check it
 
+Run [`verify.sh`](verify.sh) on the Proxmox host. It checks the services, that
+Jellyfin refuses everything the Gate didn't sign, the network isolation, TLS,
+and the master key's location. With an admin key, it also does a full round
+trip through the Gate: it enrolls a temporary device, signs in, reaches
+Jellyfin, confirms tickets and signatures can't be reused, then revokes the
+device and confirms it's locked out.
+
+```sh
+ADMIN_KEY='lfa_…' GATE=201 JF=202 GATE_IP=192.168.1.20 bash verify.sh
+```
+
+Every line should read PASS or WARN, and it exits non-zero on any FAIL.
+Rerun it after every Jellyfin or Gate update. If an update ever stops the
+plugin loading, this is what shows it.
+
+The manual checks below cover the same ground, plus the ones that need a
+device outside your network.
+
+
 | From | Command | Expect |
 |---|---|---|
 | LAN PC | `curl -m 5 http://10.20.0.3:8096/health` | timeout (no route) |
