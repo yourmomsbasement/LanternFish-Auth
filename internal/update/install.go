@@ -42,6 +42,19 @@ type Installer struct {
 	StatusPath  string
 	RequestPath string
 
+	// LockPath is held for a whole installation, so the dashboard's
+	// updater, the automatic one and the command line never overlap. It
+	// must be in a directory only root can write.
+	LockPath string
+	// ProbationPath marks a new version as being on probation: while it
+	// exists, the Gate refuses changes to its data, so a rollback (which
+	// restores the data file) can't undo a revocation or revive a used
+	// ticket. Readable by the Gate, writable only by root.
+	ProbationPath string
+	// StopWait is how long to wait for a stopped Gate to release its data
+	// file lock. Default 30s.
+	StopWait time.Duration
+
 	Stop    func() error
 	Start   func() error
 	Healthy func(ctx context.Context) error
@@ -81,7 +94,9 @@ func (in *Installer) alert(msg string) {
 
 func (in *Installer) status(s Status) {
 	s.At = in.now().UTC()
-	s.From = in.Current
+	if s.From == "" {
+		s.From = in.Current
+	}
 	if in.StatusPath != "" {
 		data, _ := json.MarshalIndent(s, "", "  ")
 		if err := writeFileAtomic(in.StatusPath, data, 0o644); err != nil {
@@ -131,6 +146,12 @@ type ApplyOptions struct {
 }
 
 // Apply installs version.
+//
+// SECURITY: the whole installation runs under LockPath, and the downgrade
+// check compares with the version actually installed, read from the binary
+// under that lock. Comparing with this process's own version let two
+// overlapping updates (say the timer and the dashboard) install an older
+// release over a newer one.
 func (in *Installer) Apply(ctx context.Context, version, by string, opt ApplyOptions) (err error) {
 	st := Status{State: "installing", Version: strings.TrimPrefix(version, "v"), RequestedBy: by}
 	fail := func(e error) error {
@@ -139,15 +160,24 @@ func (in *Installer) Apply(ctx context.Context, version, by string, opt ApplyOpt
 		in.alert(fmt.Sprintf("⚠️ Lanternfish Gate update to %s failed: %v", st.Version, e))
 		return e
 	}
-	st.Message = "verifying the release"
-	in.status(st)
-
 	want, err := ParseVersion(version)
 	if err != nil {
 		return fail(err)
 	}
-	if cur, err := ParseVersion(in.Current); err == nil && want.Compare(cur) <= 0 && !opt.AllowDowngrade {
-		return fail(fmt.Errorf("%s is not newer than the running %s", want, cur))
+	if in.LockPath != "" {
+		unlock, err := lockExclusive(ctx, in.LockPath)
+		if err != nil {
+			return fail(fmt.Errorf("wait for other updates: %w", err))
+		}
+		defer unlock()
+	}
+	installed := in.installedVersion(ctx)
+	st.From = installed
+	st.Message = "verifying the release"
+	in.status(st)
+
+	if cur, err := ParseVersion(installed); err == nil && want.Compare(cur) <= 0 && !opt.AllowDowngrade {
+		return fail(fmt.Errorf("%s is not newer than the installed %s", want, cur))
 	}
 	if want.Pre != "" && !opt.AllowPrerelease {
 		return fail(errors.New("pre-releases are only installed on purpose (LANTERNFISH_UPDATE_PRERELEASE, or -prerelease on the command line)"))
@@ -168,8 +198,8 @@ func (in *Installer) Apply(ctx context.Context, version, by string, opt ApplyOpt
 
 	// Stage next to the target so the final rename is atomic, and check the
 	// new binary runs and is the version it claims before stopping anything.
-	staged := in.BinPath + ".new"
-	if err := writeFileAtomic(staged, bin, 0o755); err != nil {
+	staged, err := stageFile(in.BinPath, bin)
+	if err != nil {
 		return fail(err)
 	}
 	defer os.Remove(staged)
@@ -179,21 +209,36 @@ func (in *Installer) Apply(ctx context.Context, version, by string, opt ApplyOpt
 
 	st.Message = "installing"
 	in.status(st)
-	if err := in.Stop(); err != nil {
+	// restartAndFail restarts the Gate after an early failure; a failed restart
+	// is part of the failure, not hidden.
+	restartAndFail := func(e error) error {
+		if serr := in.Start(); serr != nil {
+			e = fmt.Errorf("%w; restarting the Gate also failed: %v", e, serr)
+		}
+		return fail(e)
+	}
+	stopped, err := in.stopAndConfirm()
+	if err != nil {
+		if stopped {
+			return restartAndFail(fmt.Errorf("stop the Gate: %w", err))
+		}
 		return fail(fmt.Errorf("stop the Gate: %w", err))
 	}
 	backup, err := in.backupData()
 	if err != nil {
-		in.Start()
-		return fail(fmt.Errorf("back up the data file: %w", err))
+		return restartAndFail(fmt.Errorf("back up the data file: %w", err))
 	}
 	if err := copyFile(in.BinPath, in.PrevPath, 0o755); err != nil {
-		in.Start()
-		return fail(fmt.Errorf("keep the previous binary: %w", err))
+		return restartAndFail(fmt.Errorf("keep the previous binary: %w", err))
+	}
+	if in.ProbationPath != "" {
+		if err := writeFileAtomic(in.ProbationPath, []byte(rel.Version.String()+"\n"), 0o644); err != nil {
+			return restartAndFail(fmt.Errorf("mark the new version as on probation: %w", err))
+		}
+		defer os.Remove(in.ProbationPath)
 	}
 	if err := os.Rename(staged, in.BinPath); err != nil {
-		in.Start()
-		return fail(err)
+		return restartAndFail(err)
 	}
 	startErr := in.Start()
 	hctx, cancel := context.WithTimeout(ctx, 90*time.Second)
@@ -205,23 +250,108 @@ func (in *Installer) Apply(ctx context.Context, version, by string, opt ApplyOpt
 	if healthErr == nil {
 		st.State, st.Message = "succeeded", "installed and healthy"
 		in.status(st)
-		in.alert(fmt.Sprintf("⬆️ Lanternfish Gate updated %s → %s (%s)", in.Current, rel.Version, by))
+		in.alert(fmt.Sprintf("⬆️ Lanternfish Gate updated %s → %s (%s)", installed, rel.Version, by))
 		return nil
 	}
 
-	// Roll back: previous binary and the data file as it was before.
-	in.Stop()
+	// Roll back: previous binary and the data file as it was before. Its
+	// changes while on probation were refused, so restoring the data file
+	// only undoes the new version's own migration.
+	//
+	// SECURITY: only once the new Gate has certainly stopped. Overwriting
+	// the data file under a running Gate would leave the two disagreeing,
+	// and its next save would undo the restore.
+	st.Message = fmt.Sprintf("%s was unhealthy (%v)", rel.Version, healthErr)
+	if _, err := in.stopAndConfirm(); err != nil {
+		st.State = "needs_manual_recovery"
+		st.Message += fmt.Sprintf("; could not confirm it stopped (%v), so nothing was rolled back: "+
+			"stop lanternfish-gate, then restore %s and %s by hand", err, in.PrevPath, backup)
+		in.status(st)
+		in.alert("🚨 Lanternfish Gate update: " + st.Message)
+		return errors.New(st.Message)
+	}
 	rbErr := errors.Join(copyFile(in.PrevPath, in.BinPath, 0o755), restoreFile(backup, in.DataPath))
-	rbErr = errors.Join(rbErr, in.Start())
+	if rbErr == nil {
+		rbErr = in.Start()
+	}
+	if rbErr == nil {
+		// Report a rollback only when the old version is back and healthy.
+		if v := in.installedVersion(ctx); v != installed {
+			rbErr = fmt.Errorf("restored binary reports %q, not %s", v, installed)
+		} else {
+			hctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+			rbErr = in.Healthy(hctx)
+			cancel()
+		}
+	}
 	st.State = "rolled_back"
-	st.Message = fmt.Sprintf("%s was unhealthy (%v); restored %s", rel.Version, healthErr, in.Current)
+	st.Message += "; restored " + installed
 	if rbErr != nil {
-		st.State = "failed"
+		st.State = "needs_manual_recovery"
 		st.Message += "; ROLLBACK PROBLEM: " + rbErr.Error()
 	}
 	in.status(st)
 	in.alert("⚠️ Lanternfish Gate update: " + st.Message)
 	return errors.New(st.Message)
+}
+
+// installedVersion asks the installed binary its version, falling back to
+// this process's own if it can't be run.
+func (in *Installer) installedVersion(ctx context.Context) string {
+	out, err := exec.CommandContext(ctx, in.BinPath, "version").Output()
+	if v := strings.TrimSpace(string(out)); err == nil && v != "" {
+		return v
+	}
+	return in.Current
+}
+
+// stopAndConfirm stops the Gate and confirms it is gone by taking its data
+// file lock, which a running Gate holds. stopped reports whether the stop
+// command itself succeeded (so a restart makes sense after a failure).
+func (in *Installer) stopAndConfirm() (stopped bool, err error) {
+	if err := in.Stop(); err != nil {
+		return false, err
+	}
+	if in.DataPath == "" {
+		return true, nil
+	}
+	wait := in.StopWait
+	if wait == 0 {
+		wait = 30 * time.Second
+	}
+	release, err := lockDataFile(in.DataPath+".lock", in.DataPath, wait)
+	if err != nil {
+		return true, fmt.Errorf("the Gate still holds its data file after stopping: %w", err)
+	}
+	release()
+	return true, nil
+}
+
+// stageFile writes data next to target under a name of its own, so
+// overlapping attempts can't overwrite each other's staged binary.
+func stageFile(target string, data []byte) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".new*")
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	_, werr := f.Write(data)
+	if err := errors.Join(werr, f.Chmod(0o755), f.Sync(), f.Close()); err != nil {
+		os.Remove(name)
+		return "", err
+	}
+	return name, nil
+}
+
+// ProbationActive reports whether a new version is on probation (the
+// marker exists and is recent). A marker left by an updater that died is
+// ignored after ten minutes, so the Gate can't stay read-only forever.
+func ProbationActive(p string, now time.Time) bool {
+	if p == "" {
+		return false
+	}
+	st, err := os.Stat(p)
+	return err == nil && now.Sub(st.ModTime()) < 10*time.Minute
 }
 
 // extractBinary returns lanternfish-gate from a release tar.gz.
