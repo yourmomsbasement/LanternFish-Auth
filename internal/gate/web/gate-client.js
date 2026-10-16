@@ -12,7 +12,8 @@
   var DB_NAME = "lanternfish-gate";
   var STORE = "keys";
   var RECORD = "device";
-  var API = "/_lanternfish/v1/";
+  var PENDING = "pending-enrollment"; // a key waiting for the owner's approval
+  var API = "/_lanternfish/v2/";
   var ENROLL_CONTEXT = "lanternfish-gate/v1/enroll\n";
   var SESSION_CONTEXT = "lanternfish-gate/v1/session\n";
 
@@ -39,6 +40,9 @@
   function loadDevice() { return withStore("readonly", function (s) { return s.get(RECORD); }); }
   function saveDevice(rec) { return withStore("readwrite", function (s) { return s.put(rec, RECORD); }); }
   function forget() { return withStore("readwrite", function (s) { return s.delete(RECORD); }); }
+  function loadPending() { return withStore("readonly", function (s) { return s.get(PENDING); }); }
+  function savePending(rec) { return withStore("readwrite", function (s) { return s.put(rec, PENDING); }); }
+  function dropPending() { return withStore("readwrite", function (s) { return s.delete(PENDING); }); }
 
   function b64(buf) {
     var bytes = new Uint8Array(buf), s = "";
@@ -59,9 +63,10 @@
     }).then(function (res) {
       return res.json().catch(function () { return {}; }).then(function (data) {
         if (!res.ok) {
-          var err = new Error(data.error || "HTTP " + res.status);
+          var err = new Error(data.detail || data.error || "HTTP " + res.status);
           err.status = res.status;
           err.reason = data.reason || "";
+          err.data = data;
           throw err;
         }
         return data;
@@ -69,27 +74,57 @@
     });
   }
 
+  // enroll creates this browser's key (or reuses the one from an earlier
+  // attempt with the same ticket, which is kept in IndexedDB until it
+  // succeeds) and enrolls it. It resolves to {enrolled: true}, or to
+  // {verification_id} when the owner must approve first: then complete the
+  // verification and call finishEnrollment().
   function enroll(ticket, name) {
-    var pair;
-    return crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])
-      .then(function (p) {
-        pair = p;
-        return Promise.all([
-          crypto.subtle.exportKey("spki", pair.publicKey),
-          sign(pair.privateKey, ENROLL_CONTEXT + ticket)
-        ]);
-      })
-      .then(function (r) {
-        var body = { ticket: ticket, public_key: b64(r[0]), proof: b64(r[1]) };
-        if (name) body.name = name;
-        return post("enroll", body);
-      })
-      .then(function (res) {
-        return saveDevice({ deviceId: res.device_id, privateKey: pair.privateKey }).then(function () { return res; });
-      });
+    var pending;
+    return loadPending().then(function (p) {
+      if (p && p.ticket === ticket) return p;
+      return crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])
+        .then(function (pair) {
+          return crypto.subtle.exportKey("spki", pair.publicKey).then(function (spki) {
+            var rec = { privateKey: pair.privateKey, publicKey: b64(spki), ticket: ticket, name: name || "" };
+            return savePending(rec).then(function () { return rec; });
+          });
+        });
+    }).then(function (p) {
+      pending = p;
+      return sign(p.privateKey, ENROLL_CONTEXT + ticket);
+    }).then(function (proof) {
+      var body = { ticket: ticket, public_key: pending.publicKey, proof: b64(proof) };
+      if (pending.name) body.name = pending.name;
+      return post("enrollment/begin", body);
+    }).then(function (res) {
+      if (res.status === "verification_required") {
+        pending.verificationId = res.verification_id;
+        return savePending(pending).then(function () { return { verification_id: res.verification_id, required_all: res.required_all }; });
+      }
+      return activated(pending, res.device);
+    });
   }
 
-  function signIn() {
+  function activated(pending, device) {
+    return saveDevice({ deviceId: device.device_id, privateKey: pending.privateKey })
+      .then(dropPending).then(function () { return { enrolled: true, device_id: device.device_id }; });
+  }
+
+  // finishEnrollment activates an enrollment the owner has approved.
+  function finishEnrollment() {
+    var pending;
+    return loadPending().then(function (p) {
+      if (!p || !p.verificationId) throw new Error("No enrollment is waiting here; start again with the ticket.");
+      pending = p;
+      return sign(p.privateKey, ENROLL_CONTEXT + p.ticket);
+    }).then(function (proof) {
+      return post("enrollment/" + encodeURIComponent(pending.verificationId) + "/finish",
+        { ticket: pending.ticket, proof: b64(proof) });
+    }).then(function (res) { return activated(pending, res.device); });
+  }
+
+  function proof(path, extra) {
     var device;
     return loadDevice()
       .then(function (d) {
@@ -103,10 +138,19 @@
       })
       .then(function (c) {
         return sign(device.privateKey, SESSION_CONTEXT + device.deviceId + "\n" + c.challenge).then(function (sig) {
-          return post("session", { device_id: device.deviceId, challenge: c.challenge, signature: b64(sig) });
+          var body = { device_id: device.deviceId, challenge: c.challenge, signature: b64(sig), client: "browser" };
+          return post(path, Object.assign(body, extra || {}));
         });
       });
   }
+
+  // signIn gets a session cookie. When the policy wants more than this
+  // browser's key, it rejects with err.status 403 and
+  // err.data.error "additional_verification_required" (and a verification_id).
+  function signIn() { return proof("session"); }
+
+  // completeVerification finishes a verification with a fresh key proof.
+  function completeVerification(id) { return proof("verification/" + encodeURIComponent(id) + "/complete"); }
 
   function hasDevice() { return loadDevice().then(function (d) { return !!d; }); }
 
@@ -154,7 +198,11 @@
     renew();
   }
 
-  window.LanternfishGate = { enroll: enroll, signIn: signIn, hasDevice: hasDevice, forget: forget };
+  window.LanternfishGate = {
+    enroll: enroll, finishEnrollment: finishEnrollment, signIn: signIn,
+    completeVerification: completeVerification, hasDevice: hasDevice, forget: forget,
+    hasPendingEnrollment: function () { return loadPending().then(function (p) { return !!(p && p.verificationId); }); }
+  };
 
   var me = document.currentScript;
   if (me && me.hasAttribute("data-autorenew")) autoRenew();

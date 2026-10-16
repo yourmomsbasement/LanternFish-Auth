@@ -27,7 +27,16 @@
     network_not_approved: "This device isn't allowed to sign in from this network.",
     credential_mismatch: "This connection presented two different devices' credentials.",
     device_revoked: "This device has been revoked.",
-    could_not_save_network_approval: "The Gate couldn't record this network. Try again in a minute."
+    could_not_save_network_approval: "The Gate couldn't record this network. Try again in a minute.",
+    country_denied: "Access from this country isn't allowed.",
+    country_not_allowed: "Access from this country isn't allowed.",
+    location_unknown: "This connection's location can't be determined, and the policy requires one.",
+    new_country: "Access from a new country isn't allowed for this device.",
+    factor_not_set_up: "The owner hasn't set up the authenticator this policy requires. Ask the administrator for a setup link.",
+    mac_report_required: "This device must report its network address, which this app doesn't do.",
+    mac_report_unsupported: "This device's profile needs a native app; browsers can't use it.",
+    reported_mac_changed: "This device was suspended because its reported network address changed. It must be re-enrolled.",
+    verification_required: "This device needs your approval again."
   };
   function reasonText(code) { return REASONS[code] || ""; }
 
@@ -37,9 +46,23 @@
     document.getElementById("ticket").focus();
   }
 
+  // toVerify goes to the verification page. The handle travels in the
+  // fragment, which browsers never send to a server.
+  function toVerify(id, enroll) {
+    location.assign("/_lanternfish/verify#id=" + encodeURIComponent(id) + (enroll ? "&enroll=1" : "") +
+      "&next=" + encodeURIComponent(nextPath()));
+  }
+
   function signIn() {
     status.textContent = "Signing in…";
-    return window.LanternfishGate.signIn().then(function () { location.replace(nextPath()); });
+    return window.LanternfishGate.signIn().then(function () { location.replace(nextPath()); }, function (err) {
+      if (err.status === 403 && err.data && err.data.error === "additional_verification_required") {
+        status.textContent = "This sign-in needs your approval…";
+        toVerify(err.data.verification_id, false);
+        return new Promise(function () {}); // navigating
+      }
+      throw err;
+    });
   }
 
   form.addEventListener("submit", function (e) {
@@ -49,7 +72,14 @@
     if (!ticket) return;
     button.disabled = true;
     status.textContent = "Creating this browser's key and enrolling…";
-    window.LanternfishGate.enroll(ticket, name).then(signIn).catch(function (err) {
+    window.LanternfishGate.enroll(ticket, name).then(function (res) {
+      if (res.verification_id) {
+        status.textContent = "The owner must approve this device…";
+        toVerify(res.verification_id, true);
+        return;
+      }
+      return signIn();
+    }).catch(function (err) {
       status.textContent = "Enrollment failed: " + err.message;
       button.disabled = false;
     });

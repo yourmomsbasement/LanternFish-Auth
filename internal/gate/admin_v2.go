@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -13,24 +14,24 @@ import (
 
 func (g *Gate) adminV2Routes(mux *http.ServeMux) {
 	const p = "/_lanternfish/admin/v2/"
-	mux.HandleFunc("GET "+p+"policy", g.admin(g.handleGetPolicies))
-	mux.HandleFunc("GET "+p+"policy/recommended", g.admin(g.handleRecommendedPolicy))
-	mux.HandleFunc("GET "+p+"policy/history", g.admin(g.handlePolicyHistory))
-	mux.HandleFunc("POST "+p+"policy/preview", g.admin(g.handlePreviewPolicy))
-	mux.HandleFunc("PUT "+p+"policy", g.admin(g.handlePublishPolicy))
+	mux.HandleFunc("GET "+p+"policy", g.admin(scopePolicyRead, g.handleGetPolicies))
+	mux.HandleFunc("GET "+p+"policy/recommended", g.admin(scopePolicyRead, g.handleRecommendedPolicy))
+	mux.HandleFunc("GET "+p+"policy/history", g.admin(scopePolicyRead, g.handlePolicyHistory))
+	mux.HandleFunc("POST "+p+"policy/preview", g.admin(scopePolicyRead, g.handlePreviewPolicy))
+	mux.HandleFunc("PUT "+p+"policy", g.admin(scopePolicyWrite, g.handlePublishPolicy))
 
-	mux.HandleFunc("GET "+p+"profiles", g.admin(g.handleListProfiles))
-	mux.HandleFunc("POST "+p+"profiles", g.admin(g.handleCreateProfile))
-	mux.HandleFunc("DELETE "+p+"profiles/{id}", g.admin(g.handleDeleteProfile))
+	mux.HandleFunc("GET "+p+"profiles", g.admin(scopePolicyRead, g.handleListProfiles))
+	mux.HandleFunc("POST "+p+"profiles", g.admin(scopePolicyWrite, g.handleCreateProfile))
+	mux.HandleFunc("DELETE "+p+"profiles/{id}", g.admin(scopePolicyWrite, g.handleDeleteProfile))
 
-	mux.HandleFunc("GET "+p+"subjects", g.admin(g.handleListSubjects))
-	mux.HandleFunc("POST "+p+"subjects", g.admin(g.handleCreateSubject))
-	mux.HandleFunc("POST "+p+"subjects/{id}/disable", g.admin(g.handleSubjectStatus("disabled")))
-	mux.HandleFunc("POST "+p+"subjects/{id}/enable", g.admin(g.handleSubjectStatus("active")))
+	mux.HandleFunc("GET "+p+"subjects", g.admin(scopeDevices, g.handleListSubjects))
+	mux.HandleFunc("POST "+p+"subjects", g.admin(scopeOwners, g.handleCreateSubject))
+	mux.HandleFunc("POST "+p+"subjects/{id}/disable", g.admin(scopeOwners, g.handleSubjectStatus("disabled")))
+	mux.HandleFunc("POST "+p+"subjects/{id}/enable", g.admin(scopeOwners, g.handleSubjectStatus("active")))
 
-	mux.HandleFunc("GET "+p+"devices/{id}", g.admin(g.handleGetDevice))
-	mux.HandleFunc("PUT "+p+"devices/{id}/profile", g.admin(g.handleAssignProfile))
-	mux.HandleFunc("DELETE "+p+"devices/{id}/networks/{nid}", g.admin(g.handleDeleteNetwork))
+	mux.HandleFunc("GET "+p+"devices/{id}", g.admin(scopeDevices, g.handleGetDevice))
+	mux.HandleFunc("PUT "+p+"devices/{id}/profile", g.admin(scopePolicyWrite, g.handleAssignProfile))
+	mux.HandleFunc("DELETE "+p+"devices/{id}/networks/{nid}", g.admin(scopeDevices, g.handleDeleteNetwork))
 }
 
 func policyView(rec PolicyRecord) map[string]any {
@@ -57,7 +58,15 @@ func (g *Gate) handleGetPolicies(w http.ResponseWriter, r *http.Request, _ *Admi
 }
 
 func (g *Gate) handleRecommendedPolicy(w http.ResponseWriter, r *http.Request, _ *AdminKey) {
-	writeJSON(w, http.StatusOK, map[string]any{"policy": RecommendedPolicy()})
+	p := RecommendedPolicy()
+	if g.geo.configured() {
+		p.Geo.Mode = geoObserve // record countries; enforce only once you've chosen a list
+	}
+	if g.passkeys != nil {
+		p.WebAuthn.Enabled = true
+	}
+	p.normalize()
+	writeJSON(w, http.StatusOK, map[string]any{"policy": p})
 }
 
 func (g *Gate) handlePolicyHistory(w http.ResponseWriter, r *http.Request, _ *AdminKey) {
@@ -105,6 +114,10 @@ func (g *Gate) handlePreviewPolicy(w http.ResponseWriter, r *http.Request, _ *Ad
 		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "problems": []string{err.Error()}})
 		return
 	}
+	if probs := g.deploymentProblems(scope, req.Policy); len(probs) > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "problems": probs})
+		return
+	}
 	now := g.cfg.Now()
 	affected, blocked, reapprove := 0, []string{}, []string{}
 	g.store.View(func(d *storeData) {
@@ -126,8 +139,40 @@ func (g *Gate) handlePreviewPolicy(w http.ResponseWriter, r *http.Request, _ *Ad
 	if cp.schedule != nil {
 		out["schedule_changes"] = cp.schedule.boundaries(now, 10, scheduleHorizon)
 	}
+	// Factors the owners in scope would need but haven't set up.
+	needed := append(append([]string{}, cp.Policy.Verification.NewNetworkRequiredAll...), cp.Policy.Verification.EnrollmentRequiredAll...)
+	if len(needed) > 0 {
+		owners := map[string]bool{}
+		g.store.View(func(d *storeData) {
+			for _, dev := range d.Devices {
+				if dev.Active() && inScope(dev, scope, d) {
+					owners[dev.SubjectID] = true
+				}
+			}
+		})
+		missing := map[string][]string{}
+		for id := range owners {
+			if m := g.missingFactors(id, needed); len(m) > 0 {
+				missing[id] = m
+			}
+		}
+		out["owners_missing_factors"] = missing
+		if len(missing) > 0 {
+			out["warnings"] = append(asStrings(out["warnings"]), "some owners haven't set up the factors this policy requires: their devices will be refused on a new network (send them a setup link first)")
+		}
+		parts := []string{}
+		for _, f := range cp.Policy.Verification.NewNetworkRequiredAll {
+			parts = append(parts, map[string]string{factorTOTP: "authenticator code", factorWebAuthn: "WebAuthn"}[f])
+		}
+		if len(parts) > 0 {
+			out["step_up_summary"] = strings.Join(parts, " AND ")
+		}
+	}
+	if cp.Policy.Geo.Mode == geoEnforce {
+		out["geo_note"] = "addresses in geo.exempt_networks skip country rules; everything else unknown is treated per unknown_action"
+	}
 	if req.Policy.IP.Enabled && req.Policy.IP.OnChange == onChangeDeny && len(reapprove) > 0 {
-		out["warnings"] = []string{"with on_change \"deny\", the devices needing network approval can't sign in until they are re-enrolled"}
+		out["warnings"] = append(asStrings(out["warnings"]), "with on_change \"deny\", the devices needing network approval can't sign in until they are re-enrolled")
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -172,9 +217,15 @@ func (g *Gate) scopeExists(scope string) bool {
 }
 
 var (
-	errStale   = errors.New("stale")
-	errMissing = errors.New("missing")
+	errStale      = errors.New("stale")
+	errMissing    = errors.New("missing")
+	errBrowserMAC = errors.New("browser can't report a MAC")
 )
+
+func asStrings(v any) []string {
+	s, _ := v.([]string)
+	return s
+}
 
 // handlePublishPolicy publishes a new policy version. expected_version must
 // be the scope's current version, so two administrators can't silently
@@ -195,6 +246,10 @@ func (g *Gate) handlePublishPolicy(w http.ResponseWriter, r *http.Request, key *
 			problems = pe.Problems
 		}
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "invalid_policy", "problems": problems})
+		return
+	}
+	if probs := g.deploymentProblems(req.Scope, req.Policy); len(probs) > 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "invalid_policy", "problems": probs})
 		return
 	}
 	now := g.cfg.Now()
@@ -294,6 +349,10 @@ func (g *Gate) handleCreateProfile(w http.ResponseWriter, r *http.Request, key *
 		var pe *PolicyError
 		errors.As(err, &pe)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "invalid_policy", "problems": pe.Problems})
+		return
+	}
+	if probs := g.deploymentProblems("new-profile", pol); len(probs) > 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "invalid_policy", "problems": probs})
 		return
 	}
 	now := g.cfg.Now()
@@ -427,10 +486,12 @@ func (g *Gate) handleSubjectStatus(status string) adminHandler {
 			return
 		}
 		if status != "active" {
+			g.setupGrants.revokeSubject(id)
 			for _, dev := range devices {
 				g.sessions.removeDevice(dev)
 				g.grants.removeDevice(dev)
 				g.streams.cancelDevice(dev)
+				g.verifications.removeDevice(dev)
 			}
 		}
 		g.audit.write(g.cfg.Now(), "subject_"+status, map[string]any{"subject_id": id, "devices": len(devices),
@@ -476,6 +537,11 @@ func (g *Gate) handleAssignProfile(w http.ResponseWriter, r *http.Request, key *
 		if req.ProfileID != "" && d.Profiles[req.ProfileID] == nil {
 			return errProfile
 		}
+		if req.ProfileID != "" && dev.Platform == "web" {
+			if rec, ok := d.policyRecord(d.Profiles[req.ProfileID].PolicyVersion); ok && rec.Policy.MAC.RequireReport {
+				return errBrowserMAC
+			}
+		}
 		dev.ProfileID = req.ProfileID
 		return nil
 	})
@@ -485,6 +551,9 @@ func (g *Gate) handleAssignProfile(w http.ResponseWriter, r *http.Request, key *
 		return
 	case errors.Is(err, errProfile):
 		writeError(w, http.StatusBadRequest, "profile_id is not a profile")
+		return
+	case errors.Is(err, errBrowserMAC):
+		writeError(w, http.StatusBadRequest, "that profile requires MAC reports, which a browser can't send")
 		return
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, "could not save")

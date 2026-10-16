@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up sign-in · Lanternfish Gate</title>
+<link rel="stylesheet" href="/_lanternfish/style.css">
+</head>
+<body>
+<main>
+  <h1>Set up how you approve sign-ins</h1>
+  <p id="status" role="status">Loading…</p>
+
+  <section id="totpSection" hidden>
+    <h2>Authenticator app</h2>
+    <p class="muted" id="totpState"></p>
+    <button type="button" id="totpStart">Set up an authenticator app</button>
+    <div id="totpSetup" hidden>
+      <p>Scan this with your authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Aegis…), or on this phone <a id="otpLink" href="#">open it in the app</a>.</p>
+      <div id="qr"></div>
+      <p class="muted">Or type this key: <code id="secret"></code></p>
+      <form id="totpConfirm">
+        <label for="code">Then enter the 6-digit code it shows</label>
+        <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required placeholder="123456">
+        <button type="submit">Confirm</button>
+      </form>
+    </div>
+    <div id="codes" hidden>
+      <h3>Your recovery codes</h3>
+      <p>Each works once, if you lose your authenticator. <strong>They're shown only now</strong>: save them in a password manager or print them.</p>
+      <pre id="codeList"></pre>
+    </div>
+    <button type="button" id="newCodes" class="link" hidden>Make new recovery codes (the old ones stop working)</button>
+  </section>
+
+  <section id="passkeySection" hidden>
+    <h2>Passkey or security key</h2>
+    <p class="muted" id="passkeyState"></p>
+    <form id="passkeyForm">
+      <label for="pkname">Name it</label>
+      <input id="pkname" maxlength="64" placeholder="e.g. My phone, YubiKey">
+      <button type="submit">Add a passkey</button>
+    </form>
+  </section>
+
+  <p><button type="button" id="done" class="secondary">I'm done</button></p>
+</main>
+<script src="/_lanternfish/webauthn.js"></script>
+<script src="/_lanternfish/setup.js"></script>
+</body>
+</html>

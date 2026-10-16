@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/netip"
@@ -39,6 +40,8 @@ type session struct {
 	network  string    // "" when not bound
 	version  int       // policy version that authorized it
 	hardEnd  time.Time // next schedule end (zero: none within the horizon)
+	country  string    // when location rules are enforced: where it was issued
+	mac      string    // MAC evidence: "unavailable", "matched", "recorded", "changed_observed", ...
 }
 
 // maxSessionsPerDevice bounds sessions per device; see sessionTable.
@@ -86,6 +89,17 @@ func (t *sessionTable) lookup(token string, now time.Time) (session, bool) {
 // reauthorize records that a live session was re-checked under policy
 // version and may now last only until expires (never later than before). An
 // unbound session becomes bound to network if the policy now binds sessions.
+// setCountry records where a session is now used (see enforcedCountry).
+func (t *sessionTable) setCountry(token, country string) {
+	h := hashToken(token)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if s, ok := t.byID[h]; ok {
+		s.country = country
+		t.byID[h] = s
+	}
+}
+
 func (t *sessionTable) reauthorize(token string, version int, network string, expires, hardEnd time.Time) {
 	h := hashToken(token)
 	t.mu.Lock()
@@ -202,6 +216,7 @@ type grant struct {
 	expires time.Time
 	version int
 	hardEnd time.Time
+	country string
 }
 
 func newGrantTable() *grantTable { return &grantTable{byKey: map[string]grant{}} }
@@ -276,6 +291,7 @@ type stream struct {
 	network  string
 	deadline time.Time   // zero: none
 	stop     func() bool // stops the deadline timer, if any
+	session  string      // token hash of the session that opened it, if any
 }
 
 func newStreamTable() *streamTable {
@@ -308,8 +324,14 @@ func (t *streamTable) arm(st *stream, now time.Time) {
 // cancelled, or at deadline (zero: none), and a function to call when the
 // request is finished.
 func (t *streamTable) track(parent context.Context, deviceID, ip, network string, deadline, now time.Time) (context.Context, func()) {
+	return t.trackSession(parent, deviceID, "", ip, network, deadline, now)
+}
+
+// trackSession is track for a request authorized by a session (its token
+// hash), so ending that session can close what it opened.
+func (t *streamTable) trackSession(parent context.Context, deviceID, sessionHash, ip, network string, deadline, now time.Time) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(parent)
-	st := &stream{cancel: cancel, ip: ip, network: network, deadline: deadline}
+	st := &stream{cancel: cancel, ip: ip, network: network, deadline: deadline, session: sessionHash}
 	t.mu.Lock()
 	t.arm(st, now)
 	id := t.next
@@ -334,6 +356,23 @@ func (t *streamTable) track(parent context.Context, deviceID, ip, network string
 		}
 		t.mu.Unlock()
 		cancel()
+	}
+}
+
+// cancelSession closes the streams a session opened.
+func (t *streamTable) cancelSession(sessionHash string) {
+	if sessionHash == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, m := range t.byDevice {
+		for id, st := range m {
+			if st.session == sessionHash {
+				st.cancel()
+				delete(m, id)
+			}
+		}
 	}
 }
 
@@ -529,12 +568,16 @@ func (l *failureLimiter) record(ip string, now time.Time) {
 }
 
 // auditLog appends one JSON object per line.
+// It rotates at maxBytes, keeping three old files (audit.log.1 … .3).
 type auditLog struct {
-	mu sync.Mutex
-	f  *os.File
+	mu       sync.Mutex
+	f        *os.File
+	path     string
+	size     int64
+	maxBytes int64
 }
 
-func openAuditLog(path string) (*auditLog, error) {
+func openAuditLog(path string, maxBytes ...int64) (*auditLog, error) {
 	if path == "" {
 		return &auditLog{}, nil
 	}
@@ -545,7 +588,30 @@ func openAuditLog(path string) (*auditLog, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &auditLog{f: f}, nil
+	a := &auditLog{f: f, path: path, maxBytes: 20 << 20}
+	if len(maxBytes) > 0 && maxBytes[0] > 0 {
+		a.maxBytes = maxBytes[0]
+	}
+	if st, err := f.Stat(); err == nil {
+		a.size = st.Size()
+	}
+	return a, nil
+}
+
+// rotate moves audit.log to audit.log.1 (and so on). Caller holds a.mu.
+func (a *auditLog) rotate() {
+	a.f.Close()
+	for i := 2; i >= 1; i-- {
+		os.Rename(fmt.Sprintf("%s.%d", a.path, i), fmt.Sprintf("%s.%d", a.path, i+1))
+	}
+	os.Rename(a.path, a.path+".1")
+	f, err := os.OpenFile(a.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		log.Printf("audit log: can't reopen after rotating: %v", err)
+		a.f = nil
+		return
+	}
+	a.f, a.size = f, 0
 }
 
 func (a *auditLog) write(now time.Time, event string, fields map[string]any) {
@@ -560,7 +626,17 @@ func (a *auditLog) write(now time.Time, event string, fields map[string]any) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.f.Write(append(line, '\n'))
+	if a.f == nil {
+		return
+	}
+	if a.size+int64(len(line))+1 > a.maxBytes {
+		a.rotate()
+		if a.f == nil {
+			return
+		}
+	}
+	n, _ := a.f.Write(append(line, '\n'))
+	a.size += int64(n)
 }
 
 func (a *auditLog) Close() error {

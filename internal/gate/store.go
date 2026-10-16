@@ -29,6 +29,39 @@ type Device struct {
 	ProfileID string `json:"profile_id,omitempty"`
 	// Networks are the networks this device is approved to use, newest last.
 	Networks []NetworkApproval `json:"networks,omitempty"`
+
+	// Countries are the countries this device has been approved in (geo
+	// policy), newest last.
+	Countries []CountryApproval `json:"countries,omitempty"`
+	// MACs are the interface addresses this device has reported (native
+	// clients only), as keyed tags; see mac.go.
+	MACs []MACObservation `json:"macs,omitempty"`
+	// Suspended: the device must be re-enrolled (e.g. its reported MAC
+	// changed under a "reenroll" policy). Unlike revocation, the admin can
+	// lift it.
+	Suspended string `json:"suspended,omitempty"`
+	// Override is an admin-set policy for this device alone, ahead of its
+	// profile and the global policy.
+	Override *DeviceOverride `json:"override,omitempty"`
+}
+
+// DeviceOverride points a device at its own policy version for a while.
+type DeviceOverride struct {
+	PolicyVersion int        `json:"policy_version"`
+	Reason        string     `json:"reason"`
+	SetBy         string     `json:"set_by"`
+	SetAt         time.Time  `json:"set_at"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+}
+
+// CountryApproval records that a device was approved in a country.
+// Country "" (unknown) approvals are bound to the network they were made on.
+type CountryApproval struct {
+	Country    string    `json:"country"`
+	Network    string    `json:"network,omitempty"`
+	Method     string    `json:"method"`
+	ApprovedAt time.Time `json:"approved_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
 }
 
 func (d *Device) Active() bool { return d != nil && d.RevokedAt == nil }
@@ -38,7 +71,8 @@ func (d *Device) Active() bool { return d != nil && d.RevokedAt == nil }
 type NetworkApproval struct {
 	ID            string    `json:"id"`
 	Network       string    `json:"network"`
-	Method        string    `json:"method"` // "enrollment" or "key_proof"
+	Method        string    `json:"method"`             // "enrollment", "key_proof", or the factors verified, e.g. "totp+webauthn"
+	Verified      bool      `json:"verified,omitempty"` // approved through additional verification
 	ApprovedAt    time.Time `json:"approved_at"`
 	ExpiresAt     time.Time `json:"expires_at"`
 	PolicyVersion int       `json:"policy_version"`
@@ -51,6 +85,13 @@ type Subject struct {
 	Role      string    `json:"role"`   // "owner" or "admin"
 	Status    string    `json:"status"` // "active" or "disabled"
 	CreatedAt time.Time `json:"created_at"`
+
+	// Factors the owner verifies with. Secrets are sealed; see factors.go.
+	TOTP          *TOTPFactor          `json:"totp,omitempty"`
+	Passkeys      []WebAuthnCredential `json:"passkeys,omitempty"`
+	RecoveryCodes []RecoveryCode       `json:"recovery_codes,omitempty"`
+	// JellyfinUserID is an optional, admin-entered mapping; informational.
+	JellyfinUserID string `json:"jellyfin_user_id,omitempty"`
 }
 
 // Profile is a named policy that devices can be assigned to.
@@ -88,6 +129,9 @@ type Ticket struct {
 	CreatedBy string    `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
+	// KeyFingerprint, if set, binds the ticket to one device key: only that
+	// key can enroll with it (stops a stolen ticket from being used).
+	KeyFingerprint string `json:"key_fingerprint,omitempty"`
 }
 
 // AdminKey authorises the admin API (for example, Lanternfish Builder).
@@ -97,6 +141,12 @@ type AdminKey struct {
 	Hash      string     `json:"hash"`
 	CreatedAt time.Time  `json:"created_at"`
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	// Scopes limit what the key may do; nil (keys made before scopes) is
+	// every scope. See adminScopes.
+	Scopes []string `json:"scopes,omitempty"`
+	// SubjectID links the key to an admin owner whose factors protect
+	// sensitive dashboard actions (recent verification).
+	SubjectID string `json:"subject_id,omitempty"`
 }
 
 type storeData struct {
@@ -182,21 +232,23 @@ func OpenStore(path string, sealer *Sealer, now time.Time) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) init() {
-	if s.data.Devices == nil {
-		s.data.Devices = map[string]*Device{}
+func (s *Store) init() { s.data.initMaps() }
+
+func (d *storeData) initMaps() {
+	if d.Devices == nil {
+		d.Devices = map[string]*Device{}
 	}
-	if s.data.Tickets == nil {
-		s.data.Tickets = map[string]*Ticket{}
+	if d.Tickets == nil {
+		d.Tickets = map[string]*Ticket{}
 	}
-	if s.data.AdminKeys == nil {
-		s.data.AdminKeys = map[string]*AdminKey{}
+	if d.AdminKeys == nil {
+		d.AdminKeys = map[string]*AdminKey{}
 	}
-	if s.data.Subjects == nil {
-		s.data.Subjects = map[string]*Subject{}
+	if d.Subjects == nil {
+		d.Subjects = map[string]*Subject{}
 	}
-	if s.data.Profiles == nil {
-		s.data.Profiles = map[string]*Profile{}
+	if d.Profiles == nil {
+		d.Profiles = map[string]*Profile{}
 	}
 }
 
@@ -238,6 +290,7 @@ func (s *Store) Migrate(now time.Time, legacyTTL time.Duration) error {
 // publish records a new immutable policy version for scope and makes it
 // current. The caller has validated p.
 func (d *storeData) publish(scope string, p Policy, editor, reason string, now time.Time) PolicyRecord {
+	p.normalize()
 	d.LastPolicyVersion++
 	rec := PolicyRecord{Version: d.LastPolicyVersion, Scope: scope, Policy: p, Editor: editor, Reason: reason, PublishedAt: now}
 	d.PolicyHistory = append(d.PolicyHistory, rec)
@@ -251,6 +304,11 @@ func (d *storeData) publish(scope string, p Policy, editor, reason string, now t
 		inUse := map[int]bool{d.GlobalPolicyVersion: true}
 		for _, p := range d.Profiles {
 			inUse[p.PolicyVersion] = true
+		}
+		for _, dev := range d.Devices {
+			if dev.Override != nil {
+				inUse[dev.Override.PolicyVersion] = true
+			}
 		}
 		trimmed := false
 		for i, r := range d.PolicyHistory {
@@ -305,42 +363,19 @@ func (s *Store) Update(fn func(d *storeData) error) error {
 	return nil
 }
 
-// clone copies the maps and the records in them. Records are replaced, never
-// changed in place through shared pointers (time and byte fields are only
-// ever reassigned), so copying each struct is enough.
+// clone deep-copies the data through JSON, so no nested record (factors,
+// approvals, policy documents) is ever shared between the current state and
+// the copy being edited. It costs about as much as the save that follows.
 func (d *storeData) clone() storeData {
-	c := *d
-	c.Devices = make(map[string]*Device, len(d.Devices))
-	for k, v := range d.Devices {
-		x := *v
-		c.Devices[k] = &x
+	raw, err := json.Marshal(d)
+	if err != nil {
+		panic(fmt.Sprintf("store: copy: %v", err)) // every field is plain data
 	}
-	c.Tickets = make(map[string]*Ticket, len(d.Tickets))
-	for k, v := range d.Tickets {
-		x := *v
-		c.Tickets[k] = &x
+	var c storeData
+	if err := json.Unmarshal(raw, &c); err != nil {
+		panic(fmt.Sprintf("store: copy: %v", err))
 	}
-	c.AdminKeys = make(map[string]*AdminKey, len(d.AdminKeys))
-	for k, v := range d.AdminKeys {
-		x := *v
-		c.AdminKeys[k] = &x
-	}
-	c.Subjects = make(map[string]*Subject, len(d.Subjects))
-	for k, v := range d.Subjects {
-		x := *v
-		c.Subjects[k] = &x
-	}
-	c.Profiles = make(map[string]*Profile, len(d.Profiles))
-	for k, v := range d.Profiles {
-		x := *v
-		c.Profiles[k] = &x
-	}
-	// Slices are copied too: a device's networks are edited by appending
-	// and removing, and policy history is appended to.
-	for _, dev := range c.Devices {
-		dev.Networks = append([]NetworkApproval(nil), dev.Networks...)
-	}
-	c.PolicyHistory = append([]PolicyRecord(nil), d.PolicyHistory...)
+	c.initMaps()
 	return c
 }
 
