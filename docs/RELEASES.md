@@ -1,9 +1,18 @@
 # Signed releases and updates
 
-Gates install only releases whose manifest is signed by a key you trust. The
-Gate itself only verifies; signing happens on your admin PC with
-[`scripts/sign-releases.sh`](../scripts/sign-releases.sh), and the key never
-leaves that machine.
+Gates install only releases whose manifest is signed by the project's release
+key. The public half of that key is built into every `lanternfish-gate`
+binary ([`internal/update/trusted-keys`](../internal/update/trusted-keys)),
+so anyone running a Gate gets verified updates with no setup. The private half
+stays on the maintainer's admin PC: signing happens there with
+[`scripts/sign-releases.sh`](../scripts/sign-releases.sh), and the Gate itself
+only verifies.
+
+What this protects: an update is installed only if the maintainer signed it,
+even if the GitHub account, the release page or the download is tampered
+with. Your *first* install is trusted the way any download is (check it
+against `SHA256SUMS` on the release page); every update after it is checked
+against the key that install carries.
 
 ```
 GitHub Actions                 admin PC                             Gate (CT 200)
@@ -19,9 +28,25 @@ and the manifest file's exact bytes, stored as
 `{"key_id": "<first 16 hex digits of SHA-256(public key)>", "signature": "<base64>"}`
 in `lanternfish-release.json.sig`.
 
-## One-time setup
+## Running a Gate
 
-### 1. On your admin PC
+Nothing to set up for signatures. `install-gate.sh` from any release since
+0.2.1 installs the updater:
+
+* `lanternfish-gate-update.path` watches for requests from the dashboard and
+  starts `lanternfish-gate-update.service` (root) to install them.
+* `lanternfish-gate-update-auto.timer` runs nightly. It installs nothing
+  unless you set `LANTERNFISH_AUTO_UPDATE` in `/etc/lanternfish/gate.env`:
+  `patch` (x.y.**Z** only), `minor` (x.**Y**.z), or `all`. Pre-releases are
+  never installed automatically.
+
+`/etc/lanternfish/release-keys` can list extra keys to trust (one
+`lfrk1 …` line each), for example if you run your own fork. It's usually
+empty.
+
+## Maintainer: one-time setup
+
+### 1. Create the release key (admin PC)
 
 Needs `bash`, `openssl` 1.1.1 or newer, `curl`, `jq` and `sha256sum`
 (Debian/Ubuntu: `apt install openssl curl jq`). Copy
@@ -43,8 +68,7 @@ lfrk1 jC3F7rgUiYR6ChC9Oy2mN84L1d3HqrZXi1ZRCx85Afw= you@admin-vm 2026-10-16
 
 * Back the key file up offline (a USB stick, your password manager). Never
   upload it, and never store the passphrase on the machine.
-* If you lose it, make a new one and replace the public key on your Gates.
-  If it leaks, do that at once.
+* If you lose it, make a new one and rotate (below).
 
 **Let the script upload signatures:** create a fine-grained GitHub token at
 GitHub → Settings → Developer settings → Fine-grained tokens, with access to
@@ -71,26 +95,22 @@ in `~/.config/lanternfish/sign.env`, then add this crontab line
 0 * * * * /usr/local/bin/sign-releases.sh notify
 ```
 
-### 2. On each Gate (CT 200)
+### 2. Build the public key into the Gate
 
-Trust your key, as root:
+Put the `lfrk1 …` line that `keygen` printed into
+[`internal/update/trusted-keys`](../internal/update/trusted-keys), commit it,
+and publish the next release. From that release on, every Gate trusts it.
+The line is public; it's safe in the repository.
 
-```sh
-echo 'lfrk1 jC3F…Afw= you@admin-vm 2026-10-16' >> /etc/lanternfish/release-keys
-systemctl restart lanternfish-gate
-```
+**Rotating the key:** add the new key's line (keeping the old one), publish a
+release signed with the old key, then remove the old line in a later release
+signed with the new key. Gates that skipped the middle release can still be
+updated by hand.
 
-The file holds only public keys. You can list two (your key and a spare kept
-offline) to rotate without a gap.
-
-`install-gate.sh` from any release since 0.2.1 installs the updater:
-
-* `lanternfish-gate-update.path` watches for requests from the dashboard and
-  starts `lanternfish-gate-update.service` (root) to install them.
-* `lanternfish-gate-update-auto.timer` runs nightly. It installs nothing
-  unless you set `LANTERNFISH_AUTO_UPDATE` in `/etc/lanternfish/gate.env`:
-  `patch` (x.y.**Z** only), `minor` (x.**Y**.z), or `all`. Pre-releases are
-  never installed automatically.
+**If the key leaks:** remove its line and publish a release signed with a
+new key at once. Gates trust a key until they update to a release without
+it, so tell people to update by hand (checking the download against
+`SHA256SUMS`) rather than through the updater.
 
 ## Publishing a release
 
@@ -157,6 +177,6 @@ systemctl start lanternfish-gate
 ## Windows
 
 Gates on Windows don't update themselves. Check a release by hand with
-`lanternfish-gate release-verify -keys release-keys lanternfish-release.json lanternfish-release.json.sig`
+`lanternfish-gate release-verify lanternfish-release.json lanternfish-release.json.sig`
 (and the archive against the manifest), then replace the binary. The signing
 script runs on Linux or macOS (or WSL).

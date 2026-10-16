@@ -25,12 +25,8 @@ const (
 
 func updateSource() (*update.Source, string) {
 	src := &update.Source{Repo: env("LANTERNFISH_UPDATE_REPO", defaultUpdateRepo), API: os.Getenv("LANTERNFISH_UPDATE_API")}
-	path := env("LANTERNFISH_RELEASE_KEYS", defaultKeysPath)
-	keys, err := update.LoadPublicKeys(path)
+	keys, err := update.TrustedKeys(env("LANTERNFISH_RELEASE_KEYS", defaultKeysPath))
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return src, "no trusted release keys yet: put your public key in " + path
-		}
 		return src, err.Error()
 	}
 	src.Keys = keys
@@ -56,12 +52,12 @@ func gateUpdates() *gate.Updates {
 
 func releaseVerify(args []string) error {
 	fs := flag.NewFlagSet("release-verify", flag.ExitOnError)
-	keys := fs.String("keys", env("LANTERNFISH_RELEASE_KEYS", defaultKeysPath), "trusted release keys")
+	keys := fs.String("keys", env("LANTERNFISH_RELEASE_KEYS", defaultKeysPath), "extra trusted keys, besides the built-in ones")
 	fs.Parse(args)
 	if fs.NArg() != 2 {
 		return errors.New("usage: lanternfish-gate release-verify [-keys FILE] MANIFEST SIGNATURE")
 	}
-	k, err := update.LoadPublicKeys(*keys)
+	k, err := update.TrustedKeys(*keys)
 	if err != nil {
 		return err
 	}

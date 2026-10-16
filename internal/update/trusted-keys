@@ -1,0 +1,9 @@
+# Release signing keys every Lanternfish Gate trusts, built into the binary.
+#
+# One per line: lfrk1 <base64 Ed25519 public key> <comment>
+# The maintainer's key comes from `scripts/sign-releases.sh keygen` (only the
+# public half belongs here). To rotate, add the new key in a release signed
+# with the old one, then remove the old key in a later release.
+#
+# Forks: replace these with your own key, or add keys per machine in
+# /etc/lanternfish/release-keys.
