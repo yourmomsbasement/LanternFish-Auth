@@ -3,7 +3,7 @@
 # signs (scripts/sign-releases.sh) and Gates verify before updating.
 #   release-manifest.sh VERSION DIR > lanternfish-release.json
 set -euo pipefail
-version=${1#v}
+version=${1#[vV]}
 dir=$2
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "bad version: $1" >&2; exit 1; }
 files=$(cd "$dir" && for f in *; do
