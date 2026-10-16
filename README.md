@@ -104,9 +104,10 @@ the Jellyfin plugin, or by the Gate when the plugin doesn't (see
 From a computer on an admin network (`LANTERNFISH_ADMIN_ALLOW`), open
 `https://your.host/_lanternfish/admin/` and paste an admin key. From there you
 can create enrollment tickets (with a QR code a phone can scan to enroll),
-see and revoke devices, remove their approved networks, edit and publish
-access policies with a weekly preview, manage profiles and owners, and read
-the audit log. From anywhere else the page answers `404`.
+see and revoke devices (or reset their enrollment), remove their approved
+networks, give one device its own policy, edit and publish access policies
+with a weekly preview, manage profiles, owners and their sign-in factors, and
+read the audit log. From anywhere else the page answers `404`.
 
 The key is exchanged for a session cookie that scripts can't read, bound to
 your address, ending after 15 minutes idle or 8 hours. Every change also
@@ -132,6 +133,42 @@ jq '{expected_version: 1, reason: "recommended policy", policy: .policy}' rec.js
 Schedules, blackouts, per-device profiles and owners are described in
 [Access policy](docs/PROTOCOL.md#access-policy).
 
+### Approving new networks, devices and countries
+
+A policy can ask the device's owner to approve a sign-in instead of just
+allowing or refusing it, for example from a network the device hasn't used,
+when adding a device, or from a new country:
+
+1. **Give owners a factor.** On the dashboard's Owners tab, open *Sign-in
+   factors* and create a setup link (show the QR code in person, or send the
+   link privately). The owner adds an authenticator app (and gets 10
+   recovery codes) and/or a passkey. Passkeys need
+   `LANTERNFISH_WEBAUTHN_RP_ID` and `LANTERNFISH_WEBAUTHN_ORIGINS` (see
+   [gate.env.example](deploy/systemd/gate.env.example)).
+2. **Ask for it in the policy.** Under *Network binding*, set *New network* to
+   *ask the owner to verify*, and tick the factors under *Additional
+   verification*. The preview lists owners who haven't set them up yet.
+3. **Signing in.** A browser shows a page asking for the code or passkey. A
+   TV shows a short code to approve from a phone at
+   `https://your.host/_lanternfish/pair`.
+
+Country rules need a local GeoLite2-Country database: create a free MaxMind
+account, install `geoipupdate`, and set `LANTERNFISH_GEOIP_DB`. Locations
+from VPNs and mobile networks are often wrong, so start with *record only*.
+Native apps can also report the device's MAC address (signed with the
+device key); requiring that belongs on a profile for TVs, never globally.
+
+**Protect the dashboard too.** Create an owner with the *admin* role, give it
+an authenticator app, and link your admin key to it on the Security tab.
+Changes to policy, owners' factors and updates then need a code from that
+app (at most every 5 minutes). Give the Builder a key limited to what it needs:
+`lanternfish-gate admin-key create -name builder -scopes tickets,devices`.
+If you lose the authenticator and its recovery codes, stop the Gate and run
+`lanternfish-gate factor reset SUBJECT_ID` on the host.
+
+Old apps (protocol v1) keep working wherever no approval is needed. Details:
+[Additional verification](docs/PROTOCOL.md#additional-verification-v2).
+
 ### Updates
 
 Releases are signed with the maintainer's offline key, whose public half is
@@ -150,8 +187,10 @@ A failed update rolls itself back. Setup and the release routine are in
 * Set `LANTERNFISH_ALERT_WEBHOOK` so every enrollment and revocation pings you.
 * Pin your own CA, or two keys, in the clients. Never pin only the leaf
   certificate, or a renewal will brick your TVs.
-* Give Lanternfish Builder its own admin key, never your Jellyfin admin
-  password.
+* Give Lanternfish Builder its own admin key, limited with `-scopes`, never
+  your Jellyfin admin password.
+* Link your own admin key to an admin owner with an authenticator app, so
+  dashboard changes that weaken access need a code.
 * The admin API only answers from private networks by default. Narrow
   `LANTERNFISH_ADMIN_ALLOW` to the PC that runs Builder.
 
