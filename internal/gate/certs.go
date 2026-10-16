@@ -2,6 +2,7 @@ package gate
 
 import (
 	"crypto/tls"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -49,6 +50,10 @@ func (c *CertReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, e
 			old, oldMod := c.cert, c.modTime
 			if err := c.load(); err != nil {
 				c.cert, c.modTime = old, oldMod
+				log.Printf("TLS certificate changed but could not be loaded, still serving the old one: %v", err)
+			} else if c.cert.Leaf != nil {
+				log.Printf("TLS certificate reloaded: %s, issued by %s, expires %s", c.cert.Leaf.Subject.CommonName,
+					c.cert.Leaf.Issuer.CommonName, c.cert.Leaf.NotAfter.UTC().Format(time.RFC3339))
 			}
 		}
 	}
