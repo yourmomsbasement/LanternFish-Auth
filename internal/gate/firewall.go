@@ -3,6 +3,7 @@ package gate
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -31,16 +32,20 @@ type FirewallPlan struct {
 
 	Gate FirewallGate `json:"gate"`
 	// InternalNet is the backends' network (vmbr1 in the guide).
-	InternalNet string          `json:"internal_net"`
-	Guests      []FirewallGuest `json:"guests"`
+	InternalNet     string          `json:"internal_net"`
+	BlockedNetworks []string        `json:"blocked_networks,omitempty"`
+	BlockLinkLocal  bool            `json:"block_link_local,omitempty"`
+	Guests          []FirewallGuest `json:"guests"`
 }
 
 // FirewallGate is the Gate's own container.
 type FirewallGate struct {
-	ID         int    `json:"id"`
-	LANNIC     string `json:"lan_nic"`     // e.g. net0: where HTTPS comes in
-	InternalIP string `json:"internal_ip"` // the Gate's address on InternalNet
-	PublicPort int    `json:"public_port"` // HTTPS, usually 443
+	ID          int    `json:"id"`
+	LANNIC      string `json:"lan_nic"`                // e.g. net0: where HTTPS comes in
+	InternalIP  string `json:"internal_ip"`            // the Gate's address on InternalNet
+	ServicePort int    `json:"service_port,omitempty"` // internal signing route, 0 disables
+	InternalNIC string `json:"internal_nic,omitempty"` // interface for the service listener
+	PublicPort  int    `json:"public_port"`            // HTTPS, usually 443
 	// SSHFrom are the addresses or networks allowed to SSH to the Gate.
 	SSHFrom   []string `json:"ssh_from"`
 	AllowPing bool     `json:"allow_ping"`
@@ -55,26 +60,67 @@ type FirewallGuest struct {
 	Ports []int  `json:"ports"`
 	// FromGate: the Gate reaches it on Ports (Jellyfin and applications).
 	FromGate bool `json:"from_gate"`
+	// ToService permits this guest to reach only the Gate internal signing port.
+	ToService bool `json:"to_service,omitempty"`
 	// TalksTo names other guests this one connects to (Sonarr to
-	// qBittorrent): their Ports are opened for it, both ways.
+	// qBittorrent): this guest gets an outbound rule to their Ports, and they
+	// get an inbound rule from it. Nothing is opened the other way round.
 	TalksTo []string `json:"talks_to"`
 	// Sources are other addresses or networks allowed to its Ports.
 	Sources []string `json:"sources"`
+	// Egress are optional external destinations this guest may reach out to,
+	// e.g. a NAS on the LAN. Each is one literal unicast address, an explicit
+	// protocol and 1-16 ports. They are allowed out before the private-network
+	// drops; no inbound rule and no reverse link is created for them.
+	Egress []EgressTarget `json:"egress"`
 	// BlockPrivate stops it reaching private networks (your LAN) except
-	// what TalksTo allows; the internet stays reachable.
+	// what TalksTo and Egress allow; the internet stays reachable.
 	BlockPrivate bool   `json:"block_private"`
 	NIC          string `json:"nic"` // the guest's NIC on InternalNet, for its address filter (default net0)
 	AppID        string `json:"app_id,omitempty"`
 }
 
+// EgressTarget is one external destination a guest may reach out to. It is
+// deliberately narrow: a single literal unicast address (no network, no
+// wildcard, no hostname, no zone), one explicit protocol and 1-16 ports.
+type EgressTarget struct {
+	IP       string `json:"ip"`
+	Protocol string `json:"protocol"` // "tcp" or "udp"
+	Ports    []int  `json:"ports"`
+}
+
 const (
-	maxFirewallGuests = 64
-	maxGuestPorts     = 16
+	maxFirewallGuests  = 64
+	maxGuestPorts      = 16
+	maxBlockedNetworks = 32
+	// maxEgressTargets bounds the external destinations one guest may have.
+	maxEgressTargets = 16
 )
+
+// fwLinkLocal are the extra ranges block_link_local adds.
+var fwLinkLocal = []string{"169.254.0.0/16", "fe80::/10", "224.0.0.0/4", "ff00::/8"}
+
+// fwPrefix parses s as a network prefix for a firewall rule and returns it
+// canonical: masked, with IPv4-mapped IPv6 rewritten as IPv4. A prefix is
+// required (not a bare address) so the operator says exactly what they mean.
+func fwPrefix(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		return "", fmt.Errorf("%q isn't a network like 192.168.1.0/24 or 2001:db8::/32", s)
+	}
+	if p.Addr().Is4In6() && p.Bits() >= 96 {
+		p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+	}
+	return p.Masked().String(), nil
+}
 
 var (
 	fwNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,39}$`)
 	fwNICRE  = regexp.MustCompile(`^net[0-9]{1,2}$`)
+	// fwBroadcast is the only broadcast address; IPv6 has none. An egress
+	// target has to be a unicast address, so this is rejected.
+	fwBroadcast = netip.MustParseAddr("255.255.255.255")
 )
 
 func validGuestID(id int) bool { return id >= 100 && id <= 999999999 }
@@ -89,6 +135,41 @@ func fwSource(s string) (string, error) {
 		return a.Unmap().String(), nil
 	}
 	return "", fmt.Errorf("%q is not an IP address or network", s)
+}
+
+// fwEgressIP parses an external destination for an egress rule. Unlike
+// fwSource it takes a single literal unicast address only: no network, no
+// wildcard, no hostname and no zone.
+func fwEgressIP(s string) (string, error) {
+	t := strings.TrimSpace(s)
+	if strings.Contains(t, "/") {
+		return "", fmt.Errorf("%q is a network; use one address", t)
+	}
+	a, err := netip.ParseAddr(t)
+	if err != nil || a.Zone() != "" {
+		return "", fmt.Errorf("%q is not a single IP address", t)
+	}
+	a = a.Unmap()
+	if a.IsUnspecified() || a.IsMulticast() || a == fwBroadcast {
+		return "", fmt.Errorf("%q isn't a usable unicast address", t)
+	}
+	return a.String(), nil
+}
+
+// sortUniquePorts sorts ports and drops duplicates, so a plan can't produce
+// the same rule twice.
+func sortUniquePorts(ports []int) []int {
+	if len(ports) == 0 {
+		return ports
+	}
+	sort.Ints(ports)
+	out := ports[:1]
+	for _, p := range ports[1:] {
+		if p != out[len(out)-1] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // validate checks a plan and normalizes it in place.
@@ -116,6 +197,20 @@ func (p *FirewallPlan) validate() []string {
 	if g.PublicPort < 1 || g.PublicPort > 65535 {
 		bad("the public port must be 1-65535")
 	}
+	if g.ServicePort < 0 || g.ServicePort > 65535 {
+		bad("the service port must be 0 (off) or 1-65535")
+	}
+	if g.ServicePort != 0 {
+		if g.InternalNIC == "" {
+			g.InternalNIC = "net1"
+		}
+		if !fwNICRE.MatchString(g.InternalNIC) || g.InternalNIC == g.LANNIC {
+			bad("the service interface must be a separate internal NIC like net1")
+		}
+		if a, err := netip.ParseAddr(g.InternalIP); err != nil || !a.Unmap().IsPrivate() {
+			bad("the service listener needs a private internal Gate address")
+		}
+	}
 	for i, s := range g.SSHFrom {
 		if v, err := fwSource(s); err != nil {
 			bad("SSH: %v", err)
@@ -133,10 +228,41 @@ func (p *FirewallPlan) validate() []string {
 			p.InternalNet = internal.String()
 		}
 	}
+	// Extra networks are canonicalized and deduplicated so the same range
+	// written two ways becomes one rule, and sorted so the plan doesn't churn
+	// when the dashboard sends the same set in a different order.
+	var blocked []string
+	seen := map[string]bool{}
+	for _, s := range p.BlockedNetworks {
+		v, err := fwPrefix(s)
+		if err != nil {
+			bad("blocked network %s", err)
+			continue
+		}
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		blocked = append(blocked, v)
+	}
+	if len(blocked) > maxBlockedNetworks {
+		bad("at most %d blocked networks (got %d)", maxBlockedNetworks, len(blocked))
+	}
+	sort.Strings(blocked)
+	p.BlockedNetworks = blocked
+	if g.ServicePort != 0 && (!internal.IsValid() || !privateServiceNetwork(internal) || !internal.Contains(parseFirewallAddr(g.InternalIP))) {
+		bad("service access needs a private internal network containing the Gate")
+	}
 	if len(p.Guests) > maxFirewallGuests {
 		bad("at most %d guests", maxFirewallGuests)
 	}
 	names, ids := map[string]bool{}, map[int]bool{g.ID: true}
+	// Source authorization trusts the address, so every guest needs its own:
+	// a duplicate (or the Gate's) would let one guest pose as another.
+	usedIP := map[string]bool{}
+	if p.Gate.InternalIP != "" {
+		usedIP[p.Gate.InternalIP] = true
+	}
 	for i := range p.Guests {
 		x := &p.Guests[i]
 		x.Name = strings.TrimSpace(x.Name)
@@ -163,6 +289,10 @@ func (p *FirewallPlan) validate() []string {
 			bad("%s: %q isn't an IP address", label, x.IP)
 		} else {
 			x.IP = a.Unmap().String()
+			if usedIP[x.IP] {
+				bad("%s: address %s is already used by another guest or the Gate", label, x.IP)
+			}
+			usedIP[x.IP] = true
 		}
 		if len(x.Ports) == 0 || len(x.Ports) > maxGuestPorts {
 			bad("%s needs 1 to %d ports", label, maxGuestPorts)
@@ -180,6 +310,31 @@ func (p *FirewallPlan) validate() []string {
 				x.Sources[j] = v
 			}
 		}
+		if len(x.Egress) > maxEgressTargets {
+			bad("%s: at most %d external targets", label, maxEgressTargets)
+		}
+		for j := range x.Egress {
+			e := &x.Egress[j]
+			tlabel := fmt.Sprintf("%s: external target %d", label, j+1)
+			if v, err := fwEgressIP(e.IP); err != nil {
+				bad("%s: %v", tlabel, err)
+			} else {
+				e.IP = v
+			}
+			e.Protocol = strings.ToLower(strings.TrimSpace(e.Protocol))
+			if e.Protocol != "tcp" && e.Protocol != "udp" {
+				bad("%s: the protocol must be tcp or udp", tlabel)
+			}
+			if len(e.Ports) == 0 || len(e.Ports) > maxGuestPorts {
+				bad("%s needs 1 to %d ports", tlabel, maxGuestPorts)
+			}
+			for _, port := range e.Ports {
+				if port < 1 || port > 65535 {
+					bad("%s: port %d isn't 1-65535", tlabel, port)
+				}
+			}
+			e.Ports = sortUniquePorts(e.Ports)
+		}
 		if x.NIC == "" {
 			x.NIC = "net0"
 		}
@@ -188,6 +343,15 @@ func (p *FirewallPlan) validate() []string {
 		}
 	}
 	for _, x := range p.Guests {
+		if x.ToService && g.ServicePort == 0 {
+			bad("%q needs an internal service port on the Gate", x.Name)
+		}
+		if x.ToService {
+			a, _ := netip.ParseAddr(x.IP)
+			if !internal.IsValid() || !internal.Contains(a) || !a.Unmap().IsPrivate() {
+				bad("%q service access requires a private address on the internal network", x.Name)
+			}
+		}
 		for _, t := range x.TalksTo {
 			if !names[strings.ToLower(t)] || strings.EqualFold(t, x.Name) {
 				bad("%q talks to %q, which isn't another guest in the plan", x.Name, t)
@@ -210,6 +374,11 @@ func (p *FirewallPlan) warnings(rt *routing) []string {
 		byIP[x.IP] = x
 		if a, err := netip.ParseAddr(x.IP); err == nil && internal.IsValid() && !internal.Contains(a) {
 			out = append(out, fmt.Sprintf("%q (%s) isn't on the internal network %s: anything on that network can still reach it unless its own firewall stops it", x.Name, x.IP, internal))
+		}
+		for _, e := range x.Egress {
+			if a, err := netip.ParseAddr(e.IP); err == nil && internal.IsValid() && internal.Contains(a) {
+				out = append(out, fmt.Sprintf("%q reaches %s, which is on the internal network %s: a guest there is better reached with \"talks to\"", x.Name, e.IP, internal))
+			}
 		}
 		for _, t := range x.TalksTo {
 			for _, y := range p.Guests {
@@ -252,6 +421,17 @@ func (p *FirewallPlan) warnings(rt *routing) []string {
 			}
 		}
 	}
+	// The extra blocked networks only apply where a guest blocks private
+	// networks; with none, they are quietly doing nothing.
+	if len(p.BlockedNetworks) > 0 || p.BlockLinkLocal {
+		used := false
+		for _, x := range p.Guests {
+			used = used || x.BlockPrivate
+		}
+		if !used {
+			out = append(out, "the extra blocked networks do nothing: no guest has Block Private on")
+		}
+	}
 	sort.Strings(out)
 	return out
 }
@@ -283,7 +463,7 @@ func suggestFirewall(rt *routing) FirewallPlan {
 			clean = clean[:40]
 		}
 		p.Guests = append(p.Guests, FirewallGuest{Name: clean, Kind: "ct", IP: a.String(), Ports: []int{port}, FromGate: true,
-			TalksTo: []string{}, Sources: []string{}, BlockPrivate: true, NIC: "net0", AppID: appID})
+			TalksTo: []string{}, Sources: []string{}, Egress: []EgressTarget{}, BlockPrivate: true, NIC: "net0", AppID: appID})
 	}
 	add("Jellyfin", "jellyfin", rt.jellyfin)
 	ids := make([]string, 0, len(rt.byID))
@@ -334,10 +514,36 @@ func (p *FirewallPlan) guestFile(x FirewallGuest) string {
 			}
 		}
 	}
+	if x.ToService && p.Gate.ServicePort != 0 {
+		fmt.Fprintf(&b, "OUT ACCEPT -dest %s -p tcp -dport %d -log nolog # internal Jellyfin service route\n", p.Gate.InternalIP, p.Gate.ServicePort)
+	}
+	// External targets are allowed out before the private-network drops, so a
+	// NAS on the LAN stays reachable while the rest of it doesn't. Outbound
+	// only: nothing here lets the target reach this guest, and nothing opens
+	// back the other way.
+	for _, e := range x.Egress {
+		for _, port := range e.Ports {
+			fmt.Fprintf(&b, "OUT ACCEPT -dest %s -p %s -dport %d -log nolog # external target\n", e.IP, e.Protocol, port)
+		}
+	}
 	if x.BlockPrivate {
 		b.WriteString("# The internet stays reachable (metadata, updates); private networks don't.\n")
 		for _, n := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"} {
 			fmt.Fprintf(&b, "OUT DROP -dest %s -log nolog\n", n)
+		}
+		// The plan's extra networks and the link-local ones, if any, come
+		// after every allowance above, so they can't override one.
+		if len(p.BlockedNetworks) > 0 {
+			b.WriteString("# Extra networks this plan blocks.\n")
+			for _, n := range p.BlockedNetworks {
+				fmt.Fprintf(&b, "OUT DROP -dest %s -log nolog\n", n)
+			}
+		}
+		if p.BlockLinkLocal {
+			b.WriteString("# Link-local and multicast addresses.\n")
+			for _, n := range fwLinkLocal {
+				fmt.Fprintf(&b, "OUT DROP -dest %s -log nolog\n", n)
+			}
 		}
 	}
 	return b.String()
@@ -351,6 +557,13 @@ func (p *FirewallPlan) gateFile() string {
 	fmt.Fprintf(&b, "IN ACCEPT -i %s -p tcp -dport %d -log nolog # HTTPS: the only public entry point\n", g.LANNIC, g.PublicPort)
 	for _, s := range g.SSHFrom {
 		fmt.Fprintf(&b, "IN ACCEPT -i %s -source %s -p tcp -dport 22 -log nolog # SSH\n", g.LANNIC, s)
+	}
+	if g.ServicePort != 0 {
+		for _, x := range p.Guests {
+			if x.ToService {
+				fmt.Fprintf(&b, "IN ACCEPT -i %s -source %s -dest %s -p tcp -dport %d -log nolog # service client %s\n", g.InternalNIC, x.IP, g.InternalIP, g.ServicePort, x.Name)
+			}
+		}
 	}
 	if g.AllowPing {
 		fmt.Fprintf(&b, "IN ACCEPT -i %s -p icmp -log nolog # ping\n", g.LANNIC)
@@ -460,10 +673,27 @@ func (g *Gate) handleGetFirewall(w http.ResponseWriter, r *http.Request, _ *Admi
 	})
 	rt := g.routing.Load()
 	suggested := suggestFirewall(rt)
-	out := map[string]any{"suggested": suggested}
+	if g.cfg.ServiceListen != "" {
+		host, port, _ := net.SplitHostPort(g.cfg.ServiceListen)
+		suggested.Gate.InternalIP = host
+		suggested.Gate.ServicePort, _ = strconv.Atoi(port)
+		suggested.Gate.InternalNIC = "net1"
+		suggested.InternalNet = g.cfg.ServiceNetwork
+		for i := range suggested.Guests {
+			for _, c := range g.cfg.ServiceClients {
+				if c.Disabled {
+					continue
+				}
+				if suggested.Guests[i].IP == parseFirewallAddr(c.IP).String() {
+					suggested.Guests[i].ToService = true
+				}
+			}
+		}
+	}
+	out := map[string]any{"suggested": suggested, "warnings": nonNil(g.firewallWarnings(&suggested))}
 	if plan != nil {
 		out["plan"] = plan
-		out["warnings"] = nonNil(plan.warnings(rt))
+		out["warnings"] = nonNil(g.firewallWarnings(plan))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -502,7 +732,7 @@ func (g *Gate) handlePutFirewall(w http.ResponseWriter, r *http.Request, key *Ad
 		return
 	}
 	g.audit.write(now, "firewall_plan_saved", map[string]any{"version": p.Version, "guests": len(p.Guests), "admin_key": key.Name})
-	writeJSON(w, http.StatusOK, map[string]any{"version": p.Version, "warnings": nonNil(p.warnings(g.routing.Load()))})
+	writeJSON(w, http.StatusOK, map[string]any{"version": p.Version, "warnings": nonNil(g.firewallWarnings(&p))})
 }
 
 // handleFirewallScript renders a plan (as sent, saved or not) as a script.
@@ -523,7 +753,7 @@ func (g *Gate) handleFirewallScript(w http.ResponseWriter, r *http.Request, key 
 	}
 	g.audit.write(now, "firewall_script_generated", map[string]any{"guests": len(p.Guests), "admin_key": key.Name})
 	writeJSON(w, http.StatusOK, map[string]any{"script": p.script(version, now), "filename": "lanternfish-firewall.sh",
-		"warnings": nonNil(p.warnings(g.routing.Load()))})
+		"warnings": nonNil(g.firewallWarnings(&p))})
 }
 
 func nonNil(s []string) []string {
@@ -532,3 +762,47 @@ func nonNil(s []string) []string {
 	}
 	return s
 }
+
+// firewallWarnings catches drift between the generated plan and the separate
+// startup-only service configuration. It never silently adds trusted peers.
+func (g *Gate) firewallWarnings(p *FirewallPlan) []string {
+	out := p.warnings(g.routing.Load())
+	defer func() { g.alertServiceConfigDrift(out) }()
+	if g.cfg.ServiceListen == "" {
+		if p.Gate.ServicePort != 0 {
+			out = append(out, "the firewall has an internal service port but the Gate service listener is disabled")
+		}
+		return out
+	}
+	host, port, _ := net.SplitHostPort(g.cfg.ServiceListen)
+	n, _ := strconv.Atoi(port)
+	if p.Gate.ServicePort != n || p.Gate.InternalIP != host || p.InternalNet != g.cfg.ServiceNetwork {
+		out = append(out, "the internal service address, port or network does not match gate.env")
+	}
+	allowed := map[string]bool{}
+	for _, c := range g.cfg.ServiceClients {
+		if c.Disabled {
+			continue
+		}
+		a, _ := netip.ParseAddr(c.IP)
+		allowed[a.Unmap().String()] = true
+		found := false
+		for _, x := range p.Guests {
+			if x.IP == a.Unmap().String() && x.ToService {
+				found = true
+			}
+		}
+		if !found {
+			out = append(out, fmt.Sprintf("service client %q needs a guest with internal Jellyfin service access", c.Name))
+		}
+	}
+	for _, x := range p.Guests {
+		if x.ToService && !allowed[x.IP] {
+			out = append(out, fmt.Sprintf("%q has firewall service access but is not an authorized service client in gate.env", x.Name))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func parseFirewallAddr(value string) netip.Addr { a, _ := netip.ParseAddr(value); return a.Unmap() }

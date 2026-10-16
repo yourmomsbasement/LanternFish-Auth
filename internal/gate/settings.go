@@ -56,6 +56,11 @@ type App struct {
 	Upstream string   `json:"upstream"` // e.g. http://10.20.0.5:8989
 	// Owners limits the app to these owners' devices (empty: every owner).
 	Owners []string `json:"owners,omitempty"`
+	// AccessMode is who may use the application. Empty keeps the original
+	// Owners semantics (legacy); "everyone" allows any owner,
+	// "selected" allows only Owners (none named: no one), and "admins"
+	// allows only owners with the admin role.
+	AccessMode string `json:"access_mode,omitempty"`
 	// PreserveHost sends the public hostname to the app (what most apps
 	// behind a reverse proxy expect) instead of the upstream's address.
 	PreserveHost bool `json:"preserve_host"`
@@ -72,6 +77,15 @@ const (
 	maxHostsPerApp = 10
 )
 
+// Application access modes. The empty string is the legacy mode, where an
+// application with no owners named is open to every owner.
+const (
+	accessLegacy   = ""
+	accessEveryone = "everyone"
+	accessSelected = "selected"
+	accessAdmins   = "admins"
+)
+
 // routing is the compiled, effective settings.
 type routing struct {
 	jellyfin    *url.URL
@@ -84,11 +98,44 @@ type routing struct {
 type appRoute struct {
 	App
 	target *url.URL
+	mode   string
 	owners map[string]bool
 }
 
-func (a *appRoute) allows(subjectID string) bool {
-	return a == nil || len(a.owners) == 0 || a.owners[subjectID]
+// allowsApp reports whether the subject may use the application. A nil
+// application is Jellyfin, which devices reach under their own policy.
+//
+// SECURITY: "selected" with no owners named allows no one: an explicit
+// selection never falls back to everyone. "admins" consults the subject's
+// stored role, never an inferred one, so an unknown or disabled owner is not
+// an admin. Every result is further subject to the device, owner and policy
+// checks made before this one.
+func (g *Gate) allowsApp(a *appRoute, subjectID string) bool {
+	if a == nil {
+		return true
+	}
+	switch a.mode {
+	case accessEveryone:
+		return true
+	case accessSelected:
+		return a.owners[subjectID]
+	case accessAdmins:
+		return g.subjectIsAdmin(subjectID)
+	default: // legacy
+		return len(a.owners) == 0 || a.owners[subjectID]
+	}
+}
+
+// subjectIsAdmin reports whether id names an active subject with the admin
+// role. It never infers the role from a name or a device.
+func (g *Gate) subjectIsAdmin(id string) bool {
+	admin := false
+	g.store.View(func(d *storeData) {
+		if s := d.Subjects[id]; id != "" && s != nil && s.Role == "admin" && s.Status == "active" {
+			admin = true
+		}
+	})
+	return admin
 }
 
 var hostnameRE = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$`)
@@ -164,7 +211,12 @@ func compileRouting(s *GateSettings, cfg Config) (*routing, error) {
 		if len(a.Hosts) == 0 || len(a.Hosts) > maxHostsPerApp {
 			bad("%s needs 1 to %d hostnames", label, maxHostsPerApp)
 		}
-		route := &appRoute{App: a, target: u, owners: map[string]bool{}}
+		switch a.AccessMode {
+		case accessLegacy, accessEveryone, accessSelected, accessAdmins:
+		default:
+			bad("%s: unknown access mode %q (use %q, %q or %q)", label, a.AccessMode, accessEveryone, accessSelected, accessAdmins)
+		}
+		route := &appRoute{App: a, target: u, mode: a.AccessMode, owners: map[string]bool{}}
 		for _, o := range a.Owners {
 			route.owners[o] = true
 		}
@@ -244,7 +296,8 @@ func (g *Gate) handleGetSettings(w http.ResponseWriter, r *http.Request, _ *Admi
 	}
 	rt := g.routing.Load()
 	env := map[string]any{"listen": g.cfg.Listen, "upstream": urlString(g.cfg.Upstream),
-		"admin_allow": prefixStrings(g.cfg.AdminAllow), "primary_host": defaultPrimaryHost(g.cfg)}
+		"admin_allow": prefixStrings(g.cfg.AdminAllow), "primary_host": defaultPrimaryHost(g.cfg),
+		"service_auth": serviceAuthMode(g.cfg), "service_network": g.cfg.ServiceNetwork, "service_listen": g.cfg.ServiceListen, "service_clients": g.cfg.ServiceClients}
 	live := map[string]any{"upstream": urlString(rt.jellyfin), "admin_allow": prefixStrings(rt.adminAllow),
 		"primary_host": rt.primaryHost, "client_address": clientIP(r)}
 	tlsInfo, names := certInfo(g.cfg.TLSCertFile)
@@ -360,7 +413,8 @@ func (g *Gate) settingsChanged(old, rt *routing) {
 	for id, a := range old.byID {
 		n := rt.byID[id]
 		if n == nil || !n.Enabled || n.Upstream != a.Upstream || !sameSet(n.Owners, a.Owners) ||
-			!sameSet(n.Hosts, a.Hosts) || n.PreserveHost != a.PreserveHost || n.IdentityHeaders != a.IdentityHeaders {
+			n.AccessMode != a.AccessMode || !sameSet(n.Hosts, a.Hosts) || n.PreserveHost != a.PreserveHost ||
+			n.IdentityHeaders != a.IdentityHeaders {
 			changed[id] = true
 		}
 	}

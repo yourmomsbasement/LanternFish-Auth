@@ -96,7 +96,7 @@ func (g *Gate) appAllows(w http.ResponseWriter, r *http.Request, dev *Device, ap
 		g.unauthenticated(w, r, "")
 		return false
 	}
-	if app.allows(dev.SubjectID) {
+	if g.allowsApp(app, dev.SubjectID) {
 		return true
 	}
 	if r.Method == http.MethodGet && acceptsHTML(r) {
@@ -184,7 +184,7 @@ func (g *Gate) handleLinkCode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "a linked device can't link others")
 		return
 	}
-	if !app.allows(dev.SubjectID) {
+	if !g.allowsApp(app, dev.SubjectID) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access_denied", "reason": "app_not_allowed"})
 		return
 	}
@@ -230,7 +230,7 @@ func (g *Gate) handleLinkRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	app := g.routing.Load().apps[host]
 	parent := g.activeDevice(c.parentID)
-	if app == nil || parent == nil || !app.allows(parent.SubjectID) {
+	if app == nil || parent == nil || !g.allowsApp(app, parent.SubjectID) {
 		g.fail(w, r, http.StatusForbidden, "link_failed", "this application or device is no longer available", fields)
 		return
 	}

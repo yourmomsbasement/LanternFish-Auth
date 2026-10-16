@@ -937,6 +937,7 @@
             "in use: " + live.admin_allow.join(", ") + ". Your address " + live.client_address + " must stay in the list.")),
         h("h3", { text: "Set in gate.env (restart to change)" }),
         h("dl", null,
+          h("dt", { text: "Internal Jellyfin service" }), h("dd", { class: "mono", text: env.service_listen ? env.service_listen + " on " + env.service_network + "; authentication: " + (env.service_auth || "ip") + "; clients: " + (env.service_clients || []).map(function (c) { return c.name + "=" + c.ip; }).join(", ") : "disabled" }),
           h("dt", { text: "Listening on" }), h("dd", { class: "mono", text: env.listen || "—" }),
           h("dt", { text: "TLS certificate" }), h("dd", null, tls.available
             ? (tls.names || []).join(", ") + " — " + (tls.issuer || "") + ", expires " + when(tls.not_after)
@@ -949,11 +950,22 @@
         s.apps.forEach(function (a, i) {
           a.hosts = a.hosts || [];
           a.owners = a.owners || [];
+          // Records saved before access modes existed have no access_mode:
+          // they keep their original behavior (no owners: every owner) unless
+          // the mode is changed here.
+          var mode = a.access_mode || (a.owners.length ? "selected" : "everyone");
           var hosts = h("input", { value: a.hosts.join(", "), placeholder: "sonarr.example.com", size: "34" });
           hosts.addEventListener("input", function () { a.hosts = hosts.value.split(/[\s,]+/).filter(Boolean); });
+          var modeSel = h("select", null,
+            h("option", { value: "everyone", text: "Everyone" }),
+            h("option", { value: "selected", text: "Selected owners" }),
+            h("option", { value: "admins", text: "Admins only" }));
+          modeSel.value = mode;
+          modeSel.addEventListener("change", function () { a.access_mode = modeSel.value; renderApps(); });
           var owners = h("span", { class: "days" }, cache.subjects.map(function (o) {
             var c = h("input", { type: "checkbox", checked: a.owners.indexOf(o.id) >= 0 });
             c.addEventListener("change", function () {
+              a.access_mode = "selected";
               a.owners = a.owners.filter(function (x) { return x !== o.id; });
               if (c.checked) a.owners.push(o.id);
             });
@@ -971,7 +983,9 @@
               field("Public hostnames", hosts, "comma-separated; each needs DNS pointing at the Gate and a place in its TLS certificate"),
               field("Address behind the Gate", input(a, "upstream", { placeholder: "http://10.20.0.5:8989", size: "30" })),
               testButton(function () { return a.upstream; })),
-            h("div", { class: "row" }, field("Owners allowed (none ticked: every owner)", owners)),
+            h("div", { class: "row" },
+              field("Who can use it", modeSel, mode === "selected" ? "Only the owners ticked below" : null),
+              mode === "selected" ? field("Owners allowed (none ticked: no one)", owners) : null),
             h("div", { class: "row" },
               check(a, "preserve_host", "Send the public hostname", "What most apps behind a reverse proxy expect"),
               check(a, "inject_renewal", "Keep browser sessions alive", "Adds the session-renewal script to the app's pages"),
@@ -998,7 +1012,8 @@
           h("p", { class: "muted small", text: "Each application gets its own hostname. Browsers sign in on the sign-in host and are linked to the application the first time; native apps use their session as usual. Devices, owners and policies are the same as Jellyfin's." }),
           appBox,
           h("button", { type: "button", class: "secondary", text: "Add application", onclick: function () {
-            s.apps.push({ name: "", enabled: true, hosts: [], upstream: "", owners: [], preserve_host: true, inject_renewal: true, identity_headers: false });
+            s.apps.push({ name: "", enabled: false, hosts: [], upstream: "", owners: [], access_mode: "selected",
+              preserve_host: true, inject_renewal: true, identity_headers: false });
             renderApps();
           } })),
         h("div", { class: "row" }, h("button", { type: "button", text: "Save network settings", onclick: save }),
@@ -1057,9 +1072,18 @@
           field("Internal address", text(g, "internal_ip", { placeholder: "10.20.0.2", size: "14" }), "the Gate's IP on the internal network"),
           field("Public HTTPS port", num(g, "public_port", { min: 1, max: 65535 }))),
         h("div", { class: "row" },
+          field("Internal service port", num(g, "service_port", { min: 0, max: 65535, placeholder: "0" }), "0 disables; match LANTERNFISH_SERVICE_LISTEN"),
+          field("Internal interface", text(g, "internal_nic", { placeholder: "net1", size: "6" }), "separate from the LAN interface")),
+        h("p", { class: "muted small", text: "Internal Jellyfin service access also requires named clients and an isolated subnet in gate.env. It never opens a public sign-in bypass." }),
+        h("div", { class: "row" },
           field("Internal network", text(p, "internal_net", { placeholder: "10.20.0.0/24", size: "16" })),
           field("SSH allowed from", list(g, "ssh_from", { placeholder: "192.168.1.10", size: "30" }), "addresses or networks; empty: no SSH"),
           check(g, "allow_ping", "Answer ping")));
+
+      var isolationCard = h("div", { class: "card" }, h("h2", { text: "Optional LAN isolation" }),
+        h("p", { class: "muted small", text: "These blocks apply to guests with Keep it off my LAN enabled. Explicit guest, internal service and external target allowances take precedence." }),
+        field("Additional LAN networks", list(p, "blocked_networks", { placeholder: "2001:db8:1234::/48", size: "40" }), "CIDR prefixes, including any public IPv6 ranges on your LAN; empty keeps the existing private-range blocks"),
+        check(p, "block_link_local", "Also block link-local and multicast destinations", "Includes metadata/link-local addresses and discovery multicast; enable only if your apps do not need them"));
 
       var guestBox = h("div");
       function renderGuests() {
@@ -1068,6 +1092,7 @@
         p.guests.forEach(function (x, i) {
           x.talks_to = x.talks_to || [];
           x.sources = x.sources || [];
+          x.egress = x.egress || [];
           var kind = h("select", null, h("option", { value: "ct", text: "container (CT)" }), h("option", { value: "vm", text: "virtual machine" }));
           kind.value = x.kind || "ct";
           kind.addEventListener("change", function () { x.kind = kind.value; });
@@ -1087,6 +1112,33 @@
             });
             return h("label", null, c, y.name);
           }));
+          // External targets: a NAS, for example. Outbound only, one literal
+          // address each, with an explicit protocol and ports.
+          var egressBox = h("div");
+          function renderEgress() {
+            clear(egressBox);
+            x.egress.forEach(function (t, ti) {
+              var ipEl = h("input", { value: t.ip || "", placeholder: "192.168.1.50", size: "14" });
+              ipEl.addEventListener("input", function () { t.ip = ipEl.value.trim(); });
+              var proto = h("select", null, h("option", { value: "tcp", text: "TCP" }), h("option", { value: "udp", text: "UDP" }));
+              proto.value = t.protocol || "tcp";
+              proto.addEventListener("change", function () { t.protocol = proto.value; });
+              var portsEl = h("input", { value: (t.ports || []).join(", "), placeholder: "445", size: "12" });
+              portsEl.addEventListener("input", function () {
+                t.ports = portsEl.value.split(/[\s,]+/).filter(Boolean).map(Number);
+              });
+              add(egressBox, h("div", { class: "row" },
+                field("Target address", ipEl),
+                field("Protocol", proto),
+                field("Ports", portsEl),
+                h("button", { type: "button", class: "danger", text: "Remove", onclick: function () {
+                  x.egress.splice(ti, 1);
+                  renderEgress();
+                } })));
+            });
+            if (!x.egress.length) add(egressBox, h("span", { class: "muted small", text: "none" }));
+          }
+          renderEgress();
           add(guestBox, h("div", { class: "card app" },
             h("div", { class: "row" }, field("Name", name), field("Type", kind),
               field("ID", num(x, "id", { min: 100, placeholder: "203" })),
@@ -1101,9 +1153,18 @@
               } })),
             h("div", { class: "row" },
               check(x, "from_gate", "The Gate reaches it", "Jellyfin and applications behind the Gate"),
-              check(x, "block_private", "Keep it off my LAN", "It can reach the internet, but no private networks except the guests it talks to"),
-              field("Talks to", talks.childNodes.length ? talks : h("span", { class: "muted small", text: "no other guests" }), "opens their ports for it"),
-              field("Also allow from", list(x, "sources", { placeholder: "none", size: "20" }), "optional addresses or networks"))));
+              check(x, "to_service", "Internal Jellyfin service access", "Only for named backends such as Seerr, also authorized in gate.env"),
+              check(x, "block_private", "Keep it off my LAN", "It can reach the internet, but private networks need an explicit guest, service or external target rule"),
+              field("Talks to", talks.childNodes.length ? talks : h("span", { class: "muted small", text: "no other guests" }), "one-way access to their ports; add a separate tick for reverse access"),
+              field("Also allow from", list(x, "sources", { placeholder: "none", size: "20" }), "optional addresses or networks")),
+            h("div", { class: "row" },
+              h("span", { class: "muted small", text: "External targets (outbound to one address each):" }),
+              h("button", { type: "button", class: "secondary", text: "Add external target", onclick: function () {
+                x.egress.push({ ip: "", protocol: "tcp", ports: [] });
+                renderEgress();
+              } })),
+            egressBox,
+            h("p", { class: "muted small", text: "Reached directly and outbound only: one literal address, one protocol, up to 16 ports, kept reachable even with \"Keep it off my LAN\" on. Your NAS is SMB TCP 445 or NFSv4 TCP 2049 — NFSv3 needs its own fixed ports." })));
         });
       }
       renderGuests();
@@ -1146,13 +1207,15 @@
       return [
         h("div", { class: "card" }, h("h2", { text: "Proxmox firewall" }),
           h("p", { class: "muted small", text: "Describe the Gate's container and every container or VM behind it, then generate a script for the Proxmox host. It writes each guest's firewall so only the Gate (and the guests you choose) can reach it, and a guest can't pretend to be the Gate. Give guests static addresses." }),
+          h("p", { class: "muted small", text: "Keep each application's own login on: leave authentication set to Forms, never \"Disabled for Local Addresses\". The Gate decides who may reach an app, not who they are inside it." }),
           fresh ? h("p", { class: "small", text: "Started from the Network tab's addresses. Fill in the container IDs and save." }) : null,
           warnBox),
         gateCard,
+        isolationCard,
         h("div", { class: "card" }, h("h2", { text: "Behind the Gate" }), guestBox,
           h("div", { class: "row" },
             h("button", { type: "button", class: "secondary", text: "Add guest", onclick: function () {
-              p.guests.push({ name: "", kind: "ct", id: 0, ip: "", ports: [], from_gate: true, talks_to: [], sources: [], block_private: true, nic: "net0" });
+              p.guests.push({ name: "", kind: "ct", id: 0, ip: "", ports: [], from_gate: true, talks_to: [], sources: [], egress: [], block_private: true, nic: "net0" });
               renderGuests();
             } }),
             h("button", { type: "button", class: "secondary", text: "Add from Network settings", onclick: fillFromNetwork }))),

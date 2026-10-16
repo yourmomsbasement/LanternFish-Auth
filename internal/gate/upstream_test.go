@@ -49,14 +49,20 @@ func TestUpstreamRequestsAreSigned(t *testing.T) {
 	}
 
 	rec := h.do("GET", "/Items/abc%2Fdef?SortBy=Name&x=%C3%A9", nil, map[string]string{
-		sessionHeader:       token,
-		gateSignatureHeader: "forged",
-		gateNonceHeader:     "forged",
+		sessionHeader:         token,
+		gateSignatureHeader:   "forged",
+		gateNonceHeader:       "forged",
+		"X-Lanternfish-Grant": "secret-grant",
+		"X-Forwarded-For":     "8.8.8.8",
+		"X-Real-IP":           "8.8.8.8",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("proxied: %d", rec.Code)
 	}
 	up := h.lastUpstream()
+	if up.Header.Get("X-Lanternfish-Grant") != "" || up.Header.Get("X-Real-IP") != "" || up.Header.Get("X-Forwarded-For") != "192.168.1.50" {
+		t.Fatal("spoofed identity header leaked")
+	}
 	if up.RequestURI != "/Items/abc%2Fdef?SortBy=Name&x=%C3%A9" {
 		t.Fatalf("upstream target %q", up.RequestURI)
 	}

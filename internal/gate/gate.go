@@ -82,6 +82,23 @@ type Config struct {
 	Listen      string
 	TLSCertFile string
 
+	// Optional internal-only Jellyfin service route; restart to change.
+	ServiceNetwork           string
+	ServiceListen            string
+	ServiceAuth              string
+	ServiceTLSCertFile       string
+	ServiceTLSKeyFile        string
+	ServiceClientCAFile      string
+	ServiceTimeout           time.Duration
+	ServiceMaxConcurrent     int
+	ServiceRequestsPerMinute int
+	ServiceMaxBodyBytes      int64
+	ServiceAlertConfigDrift  bool
+	ServiceAlertFailures     int
+	ServiceAlertWindow       time.Duration
+	ServiceCertWarnBefore    time.Duration
+	ServiceClients           []ServiceClient
+
 	// Now overrides the clock in tests.
 	Now func() time.Time
 }
@@ -138,31 +155,33 @@ const (
 )
 
 type Gate struct {
-	cfg           Config
-	store         *Store
-	sealer        *Sealer
-	ca            *deviceCA
-	upstream      *ecdsa.PrivateKey
-	audit         *auditLog
-	alerts        *alerter
-	limiter       *failureLimiter
-	sessions      *sessionTable
-	challenges    *challengeTable
-	streams       *streamTable
-	grants        *grantTable
-	adminSessions *adminSessionTable
-	verifications *verificationTable
-	setupGrants   *setupGrantTable
-	links         linkTable
-	factorLimiter *failureLimiter // wrong codes per owner
-	enrollLimiter *failureLimiter // enrollment reservations per ticket
-	geo           *geoResolver
-	passkeys      *passkeyRP
-	macKey        []byte
-	macSeen       sync.Map // device ID -> time.Time of its last valid MAC report
-	policies      atomic.Pointer[policySet]
-	policyMu      sync.Mutex // serialises policy publishes with their reload
-	proxy         *httputil.ReverseProxy
+	serviceAlertMu   sync.Mutex
+	serviceDriftLast time.Time
+	cfg              Config
+	store            *Store
+	sealer           *Sealer
+	ca               *deviceCA
+	upstream         *ecdsa.PrivateKey
+	audit            *auditLog
+	alerts           *alerter
+	limiter          *failureLimiter
+	sessions         *sessionTable
+	challenges       *challengeTable
+	streams          *streamTable
+	grants           *grantTable
+	adminSessions    *adminSessionTable
+	verifications    *verificationTable
+	setupGrants      *setupGrantTable
+	links            linkTable
+	factorLimiter    *failureLimiter // wrong codes per owner
+	enrollLimiter    *failureLimiter // enrollment reservations per ticket
+	geo              *geoResolver
+	passkeys         *passkeyRP
+	macKey           []byte
+	macSeen          sync.Map // device ID -> time.Time of its last valid MAC report
+	policies         atomic.Pointer[policySet]
+	policyMu         sync.Mutex // serialises policy publishes with their reload
+	proxy            *httputil.ReverseProxy
 
 	// lastAuth holds each device's latest sign-in time; it is saved to the
 	// data file only now and then (see noteAuth).
@@ -183,6 +202,9 @@ type Gate struct {
 }
 
 func New(cfg Config) (*Gate, error) {
+	if err := validateServiceConfig(cfg); err != nil {
+		return nil, err
+	}
 	cfg.setDefaults()
 	if cfg.Upstream == nil {
 		return nil, errors.New("upstream URL is required")
@@ -253,6 +275,7 @@ func New(cfg Config) (*Gate, error) {
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			a, _ := pr.In.Context().Value(proxyAuthKey{}).(proxyAuth)
 			pr.SetURL(a.target)
+			pr.Out.Header.Del("X-Real-IP")
 			pr.SetXForwarded()
 			if a.app != nil && a.app.PreserveHost {
 				pr.Out.Host = pr.In.Host
@@ -482,12 +505,7 @@ func (g *Gate) serveProxy(w http.ResponseWriter, r *http.Request) {
 	dev, how := auth.dev, auth.how
 
 	// Gate credentials stay at the Gate; the upstream only learns who it is.
-	r.Header.Del(sessionHeader)
-	r.Header.Del(deviceHeader)
-	r.Header.Del(authKindHeader)
-	r.Header.Del(gateTimestampHeader)
-	r.Header.Del(gateNonceHeader)
-	r.Header.Del(gateSignatureHeader)
+	stripGateHeaders(r.Header)
 	if cookies := r.Cookies(); len(cookies) > 0 {
 		r.Header.Del("Cookie")
 		for _, c := range cookies {

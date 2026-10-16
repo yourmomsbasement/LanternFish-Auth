@@ -6,3 +6,6 @@
 bin/
 obj/
 *.user
+
+# Python deployment helper caches
+__pycache__/

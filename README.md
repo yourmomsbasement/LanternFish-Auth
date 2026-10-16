@@ -26,6 +26,10 @@ The Gate is a second lock. Keep Jellyfin's own login.
 The full protocol, for client implementers, is in
 [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
+For family Seerr access, private admin tools, backend Jellyfin integration and
+narrow NAS firewall rules, see [the media stack guide](docs/MEDIA-STACK.md).
+Additional opt-in controls are described in [optional hardening](docs/OPTIONAL-HARDENING.md).
+
 ## Running it
 
 **On Proxmox:** follow [deploy/proxmox/README.md](deploy/proxmox/README.md).

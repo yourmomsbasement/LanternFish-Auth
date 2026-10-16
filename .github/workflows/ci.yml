@@ -55,7 +55,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck deploy/systemd/*.sh deploy/systemd/lanternfish-gatectl deploy/proxmox/verify.sh
+        run: shellcheck deploy/systemd/*.sh deploy/systemd/lanternfish-gatectl deploy/proxmox/verify.sh deploy/proxmox/guarded-firewall*.sh
+      - name: Guarded firewall tests (mock host commands)
+        run: bash deploy/proxmox/guarded-firewall_test.sh
+      - name: Recovery encryption dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age
+      - name: Encrypted backup and isolated recovery tests
+        run: python3 -m unittest discover -s deploy/systemd -p 'test_lanternfish_recovery.py' -v
       - name: systemd unit
         run: |
           sudo touch /usr/local/bin/lanternfish-gate && sudo chmod +x /usr/local/bin/lanternfish-gate

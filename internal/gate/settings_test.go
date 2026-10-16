@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -93,6 +96,41 @@ func (h *harness) addApp(a *appServer, mutate func(*App)) {
 	if rec := h.saveSettings(s); rec.Code != http.StatusOK {
 		h.t.Fatalf("save settings: %d %s", rec.Code, rec.Body)
 	}
+}
+
+// newSubject creates an owner (or admin) and returns its ID.
+func (h *harness) newSubject(name, role string) string {
+	h.t.Helper()
+	rec := h.admin2("POST", "subjects", map[string]string{"name": name, "role": role})
+	if rec.Code != http.StatusCreated {
+		h.t.Fatalf("create subject: %d %s", rec.Code, rec.Body)
+	}
+	return decode[Subject](h.t, rec).ID
+}
+
+// enrollFor enrolls a fresh device owned by subjectID, through an admin ticket.
+func (h *harness) enrollFor(platform, subjectID string) (*ecdsa.PrivateKey, enrollResponse) {
+	h.t.Helper()
+	rec := h.do("POST", "/_lanternfish/admin/v1/tickets", map[string]any{"platform": platform, "subject_id": subjectID},
+		map[string]string{"Authorization": "Bearer " + h.adminKey})
+	if rec.Code != http.StatusCreated {
+		h.t.Fatalf("ticket for %s: %d %s", subjectID, rec.Code, rec.Body)
+	}
+	ticket, _ := decode[map[string]any](h.t, rec)["ticket"].(string)
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	spki, _ := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	rec = h.do("POST", "/_lanternfish/v1/enroll", map[string]string{"ticket": ticket, "public_key": b64(spki),
+		"proof": b64(rawSign(key, enrollMessage(ticket)))}, nil)
+	if rec.Code != http.StatusCreated {
+		h.t.Fatalf("enroll for %s: %d %s", subjectID, rec.Code, rec.Body)
+	}
+	return key, decode[enrollResponse](h.t, rec)
+}
+
+// appGET requests an application host with an existing session token.
+func (h *harness) appGET(host, token string) *httptest.ResponseRecorder {
+	h.t.Helper()
+	return h.doHost(testClientAddr, host, "GET", "/", nil, map[string]string{sessionHeader: token})
 }
 
 func TestSettingsMoveJellyfin(t *testing.T) {
@@ -228,6 +266,256 @@ func TestSettingsChangeClosesAppStreams(t *testing.T) {
 	}
 	if jfCtx.Err() != nil {
 		t.Error("Jellyfin stream closed by an application change")
+	}
+}
+
+// TestAppAccessModeLegacyUnchanged checks that apps saved without an access
+// mode keep the original Owners behavior.
+func TestAppAccessModeLegacyUnchanged(t *testing.T) {
+	h := newHarness(t)
+	app := newAppServer(t)
+	h.addApp(app, nil) // no access_mode, no owners: every owner
+	key, enr := h.enrollECDSA("android")
+	tok := tokenOf(t, h.signInFrom(testClientAddr, enr.DeviceID, key))
+	if rec := h.appGET(appHost, tok); rec.Code != http.StatusOK || rec.Body.String() != "app home" {
+		t.Fatalf("legacy open app: %d %q", rec.Code, rec.Body)
+	}
+	// Naming an owner still limits the app to that owner, as before.
+	kid := h.newSubject("Kid", "owner")
+	s := h.settings()
+	s.Apps[0].Owners = []string{kid}
+	if rec := h.saveSettings(s); rec.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body)
+	}
+	if rec := h.appGET(appHost, tok); rec.Code != http.StatusForbidden || reasonOf(t, rec) != "app_not_allowed" {
+		t.Fatalf("legacy restricted app: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestAppAccessModeSelectedEmptyDenies checks that an explicit "selected"
+// mode with no owners named denies everyone, on request routing and on link
+// code issuance, instead of falling back to everyone.
+func TestAppAccessModeSelectedEmptyDenies(t *testing.T) {
+	h := newHarness(t)
+	app := newAppServer(t)
+	h.addApp(app, func(a *App) { a.AccessMode = accessSelected; a.Owners = []string{} })
+	key, enr := h.enrollECDSA("web")
+	tok := tokenOf(t, h.signInFrom(testClientAddr, enr.DeviceID, key))
+	if rec := h.appGET(appHost, tok); rec.Code != http.StatusForbidden || reasonOf(t, rec) != "app_not_allowed" {
+		t.Fatalf("selected with no owners: %d %s", rec.Code, rec.Body)
+	}
+	cookie, status := h.browserSignIn("gate.example", enr.DeviceID, key)
+	if status != http.StatusOK {
+		t.Fatalf("browser sign-in: %d", status)
+	}
+	rec := h.doHost(testClientAddr, "gate.example", "POST", "/_lanternfish/v2/link/code", map[string]string{"host": appHost},
+		map[string]string{"Cookie": cookie.String()})
+	if rec.Code != http.StatusForbidden || reasonOf(t, rec) != "app_not_allowed" {
+		t.Fatalf("link code for a denied application: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestAppAccessModeAdmins checks that "admins" allows an active admin owner's
+// device and denies ordinary, unknown and disabled owners.
+func TestAppAccessModeAdmins(t *testing.T) {
+	h := newHarness(t)
+	app := newAppServer(t)
+	adminID := h.newSubject("Boss", "admin")
+	kidID := h.newSubject("Kid", "owner")
+	h.addApp(app, func(a *App) { a.AccessMode = accessAdmins })
+
+	adminKey, adminEnr := h.enrollFor("android", adminID)
+	if rec := h.appGET(appHost, tokenOf(t, h.signInFrom(testClientAddr, adminEnr.DeviceID, adminKey))); rec.Code != http.StatusOK ||
+		rec.Body.String() != "app home" {
+		t.Fatalf("admin device: %d %q", rec.Code, rec.Body)
+	}
+
+	kidKey, kidEnr := h.enrollFor("android", kidID)
+	if rec := h.appGET(appHost, tokenOf(t, h.signInFrom(testClientAddr, kidEnr.DeviceID, kidKey))); rec.Code != http.StatusForbidden {
+		t.Fatalf("ordinary owner: %d %s", rec.Code, rec.Body)
+	}
+
+	// An owner no subject names is not an admin.
+	ghostKey, ghostEnr := h.enrollECDSA("android")
+	h.g.store.Update(func(d *storeData) error { d.Devices[ghostEnr.DeviceID].SubjectID = "sub_ghost"; return nil })
+	if rec := h.appGET(appHost, tokenOf(t, h.signInFrom(testClientAddr, ghostEnr.DeviceID, ghostKey))); rec.Code != http.StatusForbidden {
+		t.Fatalf("unknown owner: %d %s", rec.Code, rec.Body)
+	}
+
+	// A disabled admin is not an admin.
+	adminTok := tokenOf(t, h.signInFrom(testClientAddr, adminEnr.DeviceID, adminKey))
+	h.g.store.Update(func(d *storeData) error { d.Subjects[adminID].Status = "disabled"; return nil })
+	if rec := h.appGET(appHost, adminTok); rec.Code == http.StatusOK {
+		t.Fatalf("disabled admin allowed: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestAppAccessModeAppliesToLinkRedeem checks that redeeming a link code
+// re-checks the application's access mode, not only the state when the code
+// was issued.
+func TestAppAccessModeAppliesToLinkRedeem(t *testing.T) {
+	h := newHarness(t)
+	app := newAppServer(t)
+	h.addApp(app, func(a *App) { a.AccessMode = accessEveryone })
+	key, enr := h.enrollECDSA("web")
+	cookie, status := h.browserSignIn("gate.example", enr.DeviceID, key)
+	if status != http.StatusOK {
+		t.Fatalf("browser sign-in: %d", status)
+	}
+	rec := h.doHost(testClientAddr, "gate.example", "POST", "/_lanternfish/v2/link/code", map[string]string{"host": appHost},
+		map[string]string{"Cookie": cookie.String()})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("link code: %d %s", rec.Code, rec.Body)
+	}
+	code, _ := decode[map[string]any](t, rec)["code"].(string)
+
+	// The application is re-scoped to no one between issue and redeem.
+	s := h.settings()
+	s.Apps[0].AccessMode = accessSelected
+	s.Apps[0].Owners = []string{}
+	if rec := h.saveSettings(s); rec.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body)
+	}
+	child, childPub := newKey(t)
+	rec = h.doHost(testClientAddr, appHost, "POST", "/_lanternfish/v2/link/redeem", map[string]string{"code": code,
+		"public_key": childPub, "proof": b64(rawSign(child, linkMessage(code)))}, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("redeem after re-scoping: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestAppAccessModeChangeClosesStreams checks that changing an app's access
+// mode closes its open streams, like its other limits do.
+func TestAppAccessModeChangeClosesStreams(t *testing.T) {
+	h := newHarness(t)
+	app := newAppServer(t)
+	h.addApp(app, func(a *App) { a.AccessMode = accessEveryone })
+	_, enr := h.enrollECDSA("android")
+	appID := h.settings().Apps[0].ID
+	appCtx, done := h.g.streams.track(context.Background(), enr.DeviceID, streamAuth{ip: "192.168.1.50", app: appID}, h.now)
+	defer done()
+	jfCtx, done2 := h.g.streams.track(context.Background(), enr.DeviceID, streamAuth{ip: "192.168.1.50"}, h.now)
+	defer done2()
+
+	s := h.settings()
+	s.Apps[0].AccessMode = accessAdmins
+	if rec := h.saveSettings(s); rec.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body)
+	}
+	if appCtx.Err() == nil {
+		t.Error("stream to the re-scoped application still open")
+	}
+	if jfCtx.Err() != nil {
+		t.Error("Jellyfin stream closed by an access mode change")
+	}
+}
+
+// TestAdminModeStreamsCloseWhenOwnerDisabled checks that the existing subject
+// mutation (disable) closes an admin owner's open streams, so an admin-mode
+// application does not keep a session whose admin rights ended.
+func TestAdminModeStreamsCloseWhenOwnerDisabled(t *testing.T) {
+	h := newHarness(t)
+	app := newAppServer(t)
+	adminID := h.newSubject("Boss", "admin")
+	h.addApp(app, func(a *App) { a.AccessMode = accessAdmins })
+	_, enr := h.enrollFor("android", adminID)
+	appID := h.settings().Apps[0].ID
+	appCtx, done := h.g.streams.track(context.Background(), enr.DeviceID, streamAuth{ip: "192.168.1.50", app: appID}, h.now)
+	defer done()
+	if rec := h.admin2("POST", "subjects/"+adminID+"/disable", nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("disable admin: %d %s", rec.Code, rec.Body)
+	}
+	if appCtx.Err() == nil {
+		t.Error("stream kept open after its admin owner was disabled")
+	}
+}
+
+func TestAppAccessModeValidation(t *testing.T) {
+	h := newHarness(t)
+	app := newAppServer(t)
+	h.addApp(app, nil)
+	for _, mode := range []string{accessLegacy, accessEveryone, accessSelected, accessAdmins} {
+		s := h.settings()
+		s.Apps[0].AccessMode = mode
+		if rec := h.saveSettings(s); rec.Code != http.StatusOK {
+			t.Fatalf("save %q: %d %s", mode, rec.Code, rec.Body)
+		}
+	}
+	s := h.settings()
+	s.Apps[0].AccessMode = "root"
+	rec := h.saveSettings(s)
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "access mode") {
+		t.Fatalf("unknown access mode: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// newGate builds a Gate without a test upstream server, for unit tests of the
+// routing rules that need no sockets.
+func newGate(t *testing.T) *Gate {
+	t.Helper()
+	up, err := parseUpstream("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	g, err := New(Config{Upstream: up, DataPath: dir + "/gate.json", AuditPath: dir + "/audit.log",
+		MasterKey: randomBytes(32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { g.Close() })
+	return g
+}
+
+// TestAllowsAppUnit exercises the access-mode decision directly: legacy
+// behavior, explicit "everyone" and "selected" (empty denies), and "admins"
+// with active, ordinary, unknown and disabled owners.
+func TestAllowsAppUnit(t *testing.T) {
+	g := newGate(t)
+	g.store.Update(func(d *storeData) error {
+		d.Subjects["sub_admin"] = &Subject{ID: "sub_admin", Name: "Boss", Role: "admin", Status: "active"}
+		d.Subjects["sub_owner"] = &Subject{ID: "sub_owner", Name: "Kid", Role: "owner", Status: "active"}
+		d.Subjects["sub_off"] = &Subject{ID: "sub_off", Name: "Off", Role: "admin", Status: "disabled"}
+		return nil
+	})
+	route := func(mode string, owners ...string) *appRoute {
+		s := &GateSettings{Apps: []App{{ID: "a", Name: "A", Enabled: true, Hosts: []string{"a.example.com"},
+			Upstream: "http://10.0.0.1", AccessMode: mode, Owners: owners}}}
+		rt, err := compileRouting(s, Config{})
+		if err != nil {
+			t.Fatalf("compile %q: %v", mode, err)
+		}
+		return rt.byID["a"]
+	}
+	for _, tc := range []struct {
+		name    string
+		app     *appRoute
+		subject string
+		want    bool
+	}{
+		{"nil is Jellyfin", nil, "sub_owner", true},
+		{"legacy open", route(accessLegacy), "sub_owner", true},
+		{"legacy named owner", route(accessLegacy, "sub_owner"), "sub_owner", true},
+		{"legacy other owner", route(accessLegacy, "sub_admin"), "sub_owner", false},
+		{"everyone", route(accessEveryone), "sub_owner", true},
+		{"selected empty denies", route(accessSelected), "sub_owner", false},
+		{"selected empty denies admin", route(accessSelected), "sub_admin", false},
+		{"selected owner", route(accessSelected, "sub_owner"), "sub_owner", true},
+		{"selected other", route(accessSelected, "sub_owner"), "sub_admin", false},
+		{"admins allows admin", route(accessAdmins), "sub_admin", true},
+		{"admins denies ordinary", route(accessAdmins), "sub_owner", false},
+		{"admins denies unknown", route(accessAdmins), "sub_ghost", false},
+		{"admins denies disabled", route(accessAdmins), "sub_off", false},
+		{"admins denies empty", route(accessAdmins), "", false},
+	} {
+		if got := g.allowsApp(tc.app, tc.subject); got != tc.want {
+			t.Errorf("%s: allowsApp = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	bad := &GateSettings{Apps: []App{{ID: "a", Name: "A", Enabled: true, Hosts: []string{"a.example.com"},
+		Upstream: "http://10.0.0.1", AccessMode: "root"}}}
+	if _, err := compileRouting(bad, Config{}); err == nil || !strings.Contains(err.Error(), "access mode") {
+		t.Fatalf("unknown access mode accepted: %v", err)
 	}
 }
 

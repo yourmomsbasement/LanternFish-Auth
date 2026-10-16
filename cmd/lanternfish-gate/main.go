@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -54,6 +55,22 @@ admin-key, factor, settings, device-ca and upstream-key read the data file direc
 
 Environment:
   LANTERNFISH_LISTEN             listen address (default :8443)
+  LANTERNFISH_SERVICE_NETWORK    isolated private subnet (e.g. 10.20.0.0/24)
+  LANTERNFISH_SERVICE_LISTEN     optional private IP:port for backend Jellyfin access
+  LANTERNFISH_SERVICE_CLIENTS    allowed backend peers: seerr=10.20.0.4,...
+  LANTERNFISH_SERVICE_CLIENTS_FILE optional JSON clients, permissions and limits
+  LANTERNFISH_SERVICE_AUTH       ip (default) or mtls
+  LANTERNFISH_SERVICE_TLS_CERT   mTLS server certificate PEM
+  LANTERNFISH_SERVICE_TLS_KEY    mTLS server private key PEM
+  LANTERNFISH_SERVICE_CLIENT_CA  trusted service client CA PEM
+  LANTERNFISH_SERVICE_TIMEOUT    optional request deadline (default 2m)
+  LANTERNFISH_SERVICE_MAX_CONCURRENT optional per-service concurrent requests
+  LANTERNFISH_SERVICE_REQUESTS_PER_MINUTE optional per-service request rate
+  LANTERNFISH_SERVICE_MAX_BODY_BYTES optional body limit, 0 unlimited
+  LANTERNFISH_SERVICE_ALERT_FAILURES optional HTTP failure alert threshold
+  LANTERNFISH_SERVICE_ALERT_WINDOW optional alert window (default 5m)
+  LANTERNFISH_SERVICE_ALERT_CONFIG_DRIFT optional plan/configuration drift alerts
+  LANTERNFISH_SERVICE_CERT_WARN_BEFORE optional active-client expiry warning
   LANTERNFISH_UPSTREAM           Jellyfin URL (default http://127.0.0.1:8096)
   LANTERNFISH_TLS_CERT           server certificate (PEM, full chain)
   LANTERNFISH_TLS_KEY            server private key (PEM)
@@ -192,6 +209,67 @@ func loadConfig() (gate.Config, error) {
 		}
 		cfg.SessionTTL = d
 	}
+	cfg.ServiceNetwork = os.Getenv("LANTERNFISH_SERVICE_NETWORK")
+	cfg.ServiceListen = os.Getenv("LANTERNFISH_SERVICE_LISTEN")
+	if value := os.Getenv("LANTERNFISH_SERVICE_ALERT_CONFIG_DRIFT"); value != "" {
+		cfg.ServiceAlertConfigDrift, err = strconv.ParseBool(value)
+		if err != nil {
+			return cfg, fmt.Errorf("service alert config drift must be true or false")
+		}
+	}
+	cfg.ServiceAuth = env("LANTERNFISH_SERVICE_AUTH", "ip")
+	cfg.ServiceTLSCertFile = os.Getenv("LANTERNFISH_SERVICE_TLS_CERT")
+	cfg.ServiceTLSKeyFile = os.Getenv("LANTERNFISH_SERVICE_TLS_KEY")
+	cfg.ServiceClientCAFile = os.Getenv("LANTERNFISH_SERVICE_CLIENT_CA")
+	for _, item := range []struct {
+		name   string
+		target *int
+	}{
+		{"LANTERNFISH_SERVICE_MAX_CONCURRENT", &cfg.ServiceMaxConcurrent},
+		{"LANTERNFISH_SERVICE_REQUESTS_PER_MINUTE", &cfg.ServiceRequestsPerMinute},
+		{"LANTERNFISH_SERVICE_ALERT_FAILURES", &cfg.ServiceAlertFailures},
+	} {
+		if value := os.Getenv(item.name); value != "" {
+			*item.target, err = strconv.Atoi(value)
+			if err != nil {
+				return cfg, fmt.Errorf("%s must be an integer", item.name)
+			}
+		}
+	}
+	if value := os.Getenv("LANTERNFISH_SERVICE_MAX_BODY_BYTES"); value != "" {
+		cfg.ServiceMaxBodyBytes, err = strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return cfg, fmt.Errorf("service max body bytes must be an integer")
+		}
+	}
+	for _, item := range []struct {
+		name   string
+		target *time.Duration
+	}{
+		{"LANTERNFISH_SERVICE_TIMEOUT", &cfg.ServiceTimeout},
+		{"LANTERNFISH_SERVICE_ALERT_WINDOW", &cfg.ServiceAlertWindow},
+		{"LANTERNFISH_SERVICE_CERT_WARN_BEFORE", &cfg.ServiceCertWarnBefore},
+	} {
+		if value := os.Getenv(item.name); value != "" {
+			*item.target, err = time.ParseDuration(value)
+			if err != nil {
+				return cfg, fmt.Errorf("%s must be a duration", item.name)
+			}
+		}
+	}
+	cfg.ServiceClients, err = gate.ParseServiceClients(os.Getenv("LANTERNFISH_SERVICE_CLIENTS"))
+	if err != nil {
+		return cfg, err
+	}
+	if file := os.Getenv("LANTERNFISH_SERVICE_CLIENTS_FILE"); file != "" {
+		if os.Getenv("LANTERNFISH_SERVICE_CLIENTS") != "" {
+			return cfg, fmt.Errorf("use service clients or service clients file, not both")
+		}
+		cfg.ServiceClients, err = gate.LoadServiceClients(file)
+		if err != nil {
+			return cfg, err
+		}
+	}
 	return cfg, nil
 }
 
@@ -243,11 +321,53 @@ func serve() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var serviceServer *http.Server
+	serviceErrors := make(chan error, 1)
+	if cfg.ServiceListen != "" {
+		serviceTLS, err := g.ServiceTLSConfig()
+		if err != nil {
+			return err
+		}
+		listener, err := net.Listen("tcp", cfg.ServiceListen)
+		if err != nil {
+			return fmt.Errorf("internal service listener: %w", err)
+		}
+		defer listener.Close()
+		serviceServer = &http.Server{Addr: cfg.ServiceListen, Handler: g.ServiceHandler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: serviceRequestTimeout(cfg), TLSConfig: serviceTLS, IdleTimeout: time.Minute, MaxHeaderBytes: 32 << 10}
+		defer serviceServer.Close()
+		go func() {
+			var err error
+			if serviceTLS != nil {
+				err = serviceServer.ServeTLS(listener, "", "")
+			} else {
+				err = serviceServer.Serve(listener)
+			}
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				serviceErrors <- err
+				stop()
+			}
+		}()
+		log.Printf("internal Jellyfin service listener on %s for %d named backends", cfg.ServiceListen, len(cfg.ServiceClients))
+	}
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdown)
+		serviceDone := make(chan struct{})
+		go func() {
+			defer close(serviceDone)
+			if serviceServer != nil {
+				if err := serviceServer.Shutdown(shutdown); err != nil {
+					serviceServer.Close()
+				}
+			}
+		}()
+		if err := srv.Shutdown(shutdown); err != nil {
+			srv.Close()
+		}
+		<-serviceDone
 	}()
 	log.Printf("lanternfish-gate %s listening on %s, proxying to %s", version, srv.Addr, cfg.Upstream)
 	log.Printf("requests to Jellyfin are signed; Lanternfish plugin key: %s", g.UpstreamPublicKey())
@@ -257,9 +377,24 @@ func serve() error {
 	}
 	log.Printf("admin API answers only from %v", adminNets)
 	if err := srv.ListenAndServeTLS("", ""); !errors.Is(err, http.ErrServerClosed) {
+		stop()
+		<-shutdownDone
 		return err
 	}
+	<-shutdownDone
+	select {
+	case err := <-serviceErrors:
+		return fmt.Errorf("internal service listener: %w", err)
+	default:
+	}
 	return nil
+}
+
+func serviceRequestTimeout(cfg gate.Config) time.Duration {
+	if cfg.ServiceTimeout > 0 {
+		return cfg.ServiceTimeout
+	}
+	return 2 * time.Minute
 }
 
 func genMasterKey(args []string) error {
