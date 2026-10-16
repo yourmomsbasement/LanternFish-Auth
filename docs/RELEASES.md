@@ -83,7 +83,7 @@ systemctl restart lanternfish-gate
 The file holds only public keys. You can list two (your key and a spare kept
 offline) to rotate without a gap.
 
-`install-gate.sh` from any release since 0.2.0 installs the updater:
+`install-gate.sh` from any release since 0.2.1 installs the updater:
 
 * `lanternfish-gate-update.path` watches for requests from the dashboard and
   starts `lanternfish-gate-update.service` (root) to install them.
