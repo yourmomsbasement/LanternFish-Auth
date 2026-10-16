@@ -4,7 +4,7 @@ name: Release
 # release with a v* tag on GitHub; this builds the files and attaches them.
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "V*"]
   release:
     types: [published]
 
@@ -40,7 +40,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${GITHUB_REF_NAME#[vV]}"
           name="lanternfish-gate_${version}_${GOOS}_${GOARCH}"
           ext=""; [ "$GOOS" = windows ] && ext=".exe"
           mkdir -p "dist/$name/docs"
@@ -80,7 +80,7 @@ jobs:
           dotnet-version: 10.0.x
       - name: Build and package
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${GITHUB_REF_NAME#[vV]}"
           numeric="${version%%-*}"
           case "$numeric" in
             *.*.*.*) asm="$numeric" ;;
@@ -145,7 +145,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${GITHUB_REF_NAME#[vV]}"
           prerelease=""
           case "$version" in *-*) prerelease="--prerelease" ;; esac
           cat > notes.md <<NOTES
