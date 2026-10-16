@@ -55,25 +55,38 @@ ask_pass() {
 }
 ossl() { LF_PASS="$PASS" openssl "$@"; }
 
-api() { # api PATH -> JSON on stdout
-  local auth=()
+api() { # api PATH -> JSON on stdout; on failure, says why on stderr
+  local auth=() code msg
   [ -n "$TOKEN" ] && auth=(-H "Authorization: Bearer $TOKEN")
-  curl -fsS -H "Accept: application/vnd.github+json" -H "User-Agent: lanternfish-sign-releases" \
-    ${auth[@]+"${auth[@]}"} "$API/repos/$REPO/$1"
+  code=$(curl -sS -o "$WORK/api.out" -w '%{http_code}' -H "Accept: application/vnd.github+json" \
+    -H "User-Agent: lanternfish-sign-releases" ${auth[@]+"${auth[@]}"} "$API/repos/$REPO/$1") ||
+    { echo "sign-releases: can't reach $API (network or DNS problem)" >&2; return 1; }
+  if [ "$code" = 200 ]; then cat "$WORK/api.out"; return 0; fi
+  msg=$(jq -r '.message // empty' "$WORK/api.out" 2>/dev/null || true)
+  echo "sign-releases: GitHub answered $code${msg:+: $msg}" >&2
+  case "$code" in
+    401) echo "  The token in $TOKEN_FILE is wrong or expired. Make a new one (Contents: Read and write on $REPO)." >&2 ;;
+    403) echo "  Rate-limited or not allowed. With a token: check it can access $REPO." >&2 ;;
+    404) echo "  No repository $REPO visible to this token. Check LANTERNFISH_REPO, and that the token's" \
+              "repository access includes $REPO." >&2 ;;
+  esac
+  return 1
 }
 
-download_asset() { # download_asset ASSET_JSON OUT
-  local url
-  if [ -n "$TOKEN" ]; then
-    # The API URL works for drafts too; curl doesn't forward the token on the
-    # redirect to GitHub's file storage.
-    url=$(jq -r .url <<<"$1")
-    curl -fsSL -H "Accept: application/octet-stream" -H "Authorization: Bearer $TOKEN" \
-      -H "User-Agent: lanternfish-sign-releases" -o "$2" "$url"
+download_asset() { # download_asset REL_JSON ASSET_JSON OUT
+  local url code auth=()
+  if jq -e .draft <<<"$1" >/dev/null; then
+    # Drafts aren't public: fetch through the API with the token. curl doesn't
+    # forward the token on the redirect to GitHub's file storage.
+    [ -n "$TOKEN" ] || die "$(jq -r .tag_name <<<"$1") is a draft; reading it needs a token"
+    url=$(jq -r .url <<<"$2")
+    auth=(-H "Accept: application/octet-stream" -H "Authorization: Bearer $TOKEN")
   else
-    url=$(jq -r .browser_download_url <<<"$1")
-    curl -fsSL -H "User-Agent: lanternfish-sign-releases" -o "$2" "$url"
+    url=$(jq -r .browser_download_url <<<"$2")
   fi
+  code=$(curl -sSL -o "$3" -w '%{http_code}' -H "User-Agent: lanternfish-sign-releases" ${auth[@]+"${auth[@]}"} "$url") ||
+    die "couldn't download $(jq -r .name <<<"$2") (network problem)"
+  [ "$code" = 200 ] || die "couldn't download $(jq -r .name <<<"$2"): GitHub answered $code"
 }
 
 pending_json() { # releases with a manifest but no signature, oldest first
@@ -145,14 +158,14 @@ check_release() {
   tag=$(jq -r .tag_name <<<"$rel")
   version=${tag#v}
   asset=$(jq -c --arg n "$MANIFEST" '.assets[] | select(.name == $n)' <<<"$rel")
-  download_asset "$asset" "$dir/$MANIFEST"
+  download_asset "$rel" "$asset" "$dir/$MANIFEST"
   jq -e --arg v "$version" '.schema == 1 and .product == "lanternfish-gate" and .version == $v and (.files | length > 0)' \
     "$dir/$MANIFEST" >/dev/null || die "$tag: the manifest isn't a Lanternfish Gate $version manifest"
   while IFS=$'\t' read -r name want_sha want_size; do
     [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "$tag: unsafe file name in the manifest: $name"
     asset=$(jq -c --arg n "$name" '.assets[] | select(.name == $n)' <<<"$rel")
     [ -n "$asset" ] || die "$tag: $name is in the manifest but not attached to the release"
-    download_asset "$asset" "$dir/$name"
+    download_asset "$rel" "$asset" "$dir/$name"
     got_sha=$(sha256sum "$dir/$name" | cut -d' ' -f1)
     got_size=$(wc -c < "$dir/$name" | tr -d ' ')
     [ "$got_sha" = "$want_sha" ] && [ "$got_size" = "$want_size" ] ||
@@ -172,7 +185,9 @@ upload_sig() { # upload_sig REL_JSON FILE
   case "$code" in
     201) ;;
     422) die "$(jq -r .tag_name <<<"$1") already has a $SIG" ;;
-    401|403|404) die "upload refused ($code): the token needs Contents: read and write on $REPO" ;;
+    401) die "upload refused (401): the token in $TOKEN_FILE is wrong or expired" ;;
+    403|404) die "upload refused ($code: $(jq -r '.message // "no reason given"' "$WORK/upload.out" 2>/dev/null)). The token needs" \
+                 "Repository access including $REPO, and the permission Contents: Read and write" ;;
     *) die "upload failed ($code): $(head -c 300 "$WORK/upload.out")" ;;
   esac
 }

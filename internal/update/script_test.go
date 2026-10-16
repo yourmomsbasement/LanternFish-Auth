@@ -74,6 +74,16 @@ func TestSignReleasesScript(t *testing.T) {
 					"upload_url": srv.URL + "/uploads/" + tag + "/assets{?name,label}", "assets": as})
 			}
 			json.NewEncoder(w).Encode(out)
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/dl/"):
+			// Public download links, as for published releases.
+			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/dl/"), "/")
+			for _, a := range releases[parts[0]] {
+				if a.name == parts[1] {
+					w.Write(a.data)
+					return
+				}
+			}
+			http.NotFound(w, r)
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/assets/"):
 			if !authed || r.Header.Get("Accept") != "application/octet-stream" {
 				http.Error(w, "auth", http.StatusUnauthorized)
