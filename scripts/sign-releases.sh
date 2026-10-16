@@ -40,6 +40,16 @@ done
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+gh_token() { # the GitHub CLI's token for github.com, if it is logged in
+  local t f
+  t=$(gh auth token 2>/dev/null) && [ -n "$t" ] && { echo "$t"; return 0; }
+  # gh before 2.17 has no "auth token"; it keeps the token in hosts.yml.
+  f="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"
+  [ -f "$f" ] || return 1
+  t=$(awk '/^github\.com:/ {h=1; next} /^[^ \t]/ {h=0} h && $1 == "oauth_token:" {print $2; exit}' "$f")
+  [ -n "$t" ] && echo "$t"
+}
+
 # GitHub API access, for uploads: a token file, or else the GitHub CLI's login
 # (`gh auth login`). SSH keys can't be used: they only work for git itself.
 TOKEN="" TOKEN_SOURCE=""
@@ -51,9 +61,9 @@ if [ -f "$TOKEN_FILE" ]; then
   case "$TOKEN" in
     ssh-*|ecdsa-*|-----BEGIN*) die "$TOKEN_FILE holds an SSH key; that only works for git. Use a GitHub API token, or log in with: gh auth login" ;;
   esac
-elif [ "$API" = "https://api.github.com" ] && command -v gh >/dev/null && gh auth status --hostname github.com >/dev/null 2>&1; then
-  TOKEN=$(gh auth token --hostname github.com)
-  TOKEN_SOURCE="your GitHub CLI login"
+elif [ "$API" = "https://api.github.com" ] && command -v gh >/dev/null; then
+  TOKEN=$(gh_token) || TOKEN=""
+  [ -n "$TOKEN" ] && TOKEN_SOURCE="your GitHub CLI login"
 fi
 
 # Passphrase: asked once per run, handed to openssl through the environment
