@@ -408,6 +408,7 @@ func (g *Gate) handleResetEnrollment(w http.ResponseWriter, r *http.Request, key
 	})
 	g.sessions.removeDevice(id)
 	g.grants.removeDevice(id)
+	g.accessChanged()
 	g.streams.cancelDevice(id)
 	g.verifications.removeDevice(id)
 	if errors.Is(err, errMissing) {

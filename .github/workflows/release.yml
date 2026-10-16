@@ -46,6 +46,13 @@ jobs:
           mkdir -p "dist/$name/docs"
           go build -trimpath -ldflags "-s -w -X main.version=$version" \
             -o "dist/$name/lanternfish-gate$ext" ./cmd/lanternfish-gate
+          # The runtime is compiled into the binary, so check which one it got:
+          # exactly the Go release go.mod pins.
+          want="go$(sed -n 's/^go //p' go.mod)"
+          got=$(go version "dist/$name/lanternfish-gate$ext" | awk '{print $2}')
+          [ "$got" = "$want" ] || { echo "built with $got, want $want"; exit 1; }
+          # (govulncheck itself runs here, so not cross-compiled.)
+          env -u GOOS -u GOARCH go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -mode=binary "dist/$name/lanternfish-gate$ext"
           cp README.md "dist/$name/"
           cp docs/PROTOCOL.md "dist/$name/docs/"
           cp -r deploy "dist/$name/"

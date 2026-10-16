@@ -86,9 +86,6 @@ func (t *sessionTable) lookup(token string, now time.Time) (session, bool) {
 	return s, true
 }
 
-// reauthorize records that a live session was re-checked under policy
-// version and may now last only until expires (never later than before). An
-// unbound session becomes bound to network if the policy now binds sessions.
 // setCountry records where a session is now used (see enforcedCountry).
 func (t *sessionTable) setCountry(token, country string) {
 	h := hashToken(token)
@@ -100,21 +97,28 @@ func (t *sessionTable) setCountry(token, country string) {
 	}
 }
 
-func (t *sessionTable) reauthorize(token string, version int, network string, expires, hardEnd time.Time) {
+// reauthorize records that a live session was re-checked under policy
+// version and may now last only until expires (never later than before). An
+// unbound session becomes bound to network if the policy now binds sessions.
+// It reports whether the session still exists.
+func (t *sessionTable) reauthorize(token string, version int, network string, expires, hardEnd time.Time) bool {
 	h := hashToken(token)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if s, ok := t.byID[h]; ok {
-		s.version = version
-		if s.network == "" {
-			s.network = network
-		}
-		if expires.Before(s.expires) {
-			s.expires = expires
-		}
-		s.hardEnd = hardEnd
-		t.byID[h] = s
+	s, ok := t.byID[h]
+	if !ok {
+		return false
 	}
+	s.version = version
+	if s.network == "" {
+		s.network = network
+	}
+	if expires.Before(s.expires) {
+		s.expires = expires
+	}
+	s.hardEnd = hardEnd
+	t.byID[h] = s
+	return true
 }
 
 // removeDeviceNetworksExcept drops a device's sessions bound to a network
@@ -213,6 +217,7 @@ type grantTable struct {
 }
 
 type grant struct {
+	issued  time.Time
 	expires time.Time
 	version int
 	hardEnd time.Time
@@ -279,19 +284,36 @@ func (t *grantTable) clear() {
 // SECURITY: a deadline only ever moves earlier. Re-checking a stream under a
 // relaxed policy never extends it past what authorized it.
 type streamTable struct {
-	mu       sync.Mutex
-	next     uint64
-	byDevice map[string]map[uint64]*stream
-	after    func(time.Duration, func()) func() bool // time.AfterFunc; replaced in tests
+	recheckMu sync.Mutex // one recheck at a time, so verdicts apply in order
+	mu        sync.Mutex
+	next      uint64
+	byDevice  map[string]map[uint64]*stream
+	after     func(time.Duration, func()) func() bool // time.AfterFunc; replaced in tests
 }
 
 type stream struct {
-	cancel   context.CancelFunc
-	ip       string // client address, so a new policy can re-derive the network
-	network  string
-	deadline time.Time   // zero: none
-	stop     func() bool // stops the deadline timer, if any
-	session  string      // token hash of the session that opened it, if any
+	streamAuth
+	cancel context.CancelFunc
+	stop   func() bool // stops the deadline timer, if any
+}
+
+// streamAuth is what authorized a stream: the client address (so a new
+// policy can re-derive its network), its network key, and the credential's
+// issue time and end, from which a stricter policy can work out a deadline.
+type streamAuth struct {
+	ip       string
+	network  string    // "" when not bound
+	issued   time.Time // zero: unknown (the stream's start is used)
+	expires  time.Time // zero: unknown
+	deadline time.Time // when the stream must close; zero: none
+	session  string    // token hash of the session that opened it, if any
+}
+
+// streamVerdict is a recheck's judgement on one stream.
+type streamVerdict struct {
+	allowed  bool
+	deadline time.Time // zero: none
+	network  string    // the stream's network key under the current policy
 }
 
 func newStreamTable() *streamTable {
@@ -321,17 +343,14 @@ func (t *streamTable) arm(st *stream, now time.Time) {
 }
 
 // track returns a context that is cancelled when the device's streams are
-// cancelled, or at deadline (zero: none), and a function to call when the
+// cancelled, or at a.deadline (zero: none), and a function to call when the
 // request is finished.
-func (t *streamTable) track(parent context.Context, deviceID, ip, network string, deadline, now time.Time) (context.Context, func()) {
-	return t.trackSession(parent, deviceID, "", ip, network, deadline, now)
-}
-
-// trackSession is track for a request authorized by a session (its token
-// hash), so ending that session can close what it opened.
-func (t *streamTable) trackSession(parent context.Context, deviceID, sessionHash, ip, network string, deadline, now time.Time) (context.Context, func()) {
+func (t *streamTable) track(parent context.Context, deviceID string, a streamAuth, now time.Time) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(parent)
-	st := &stream{cancel: cancel, ip: ip, network: network, deadline: deadline, session: sessionHash}
+	if a.issued.IsZero() {
+		a.issued = now
+	}
+	st := &stream{streamAuth: a, cancel: cancel}
 	t.mu.Lock()
 	t.arm(st, now)
 	id := t.next
@@ -409,24 +428,49 @@ func (t *streamTable) devices() []string {
 	return out
 }
 
-// recheck re-evaluates each of a device's open streams: check reports
-// whether the stream's client address is still allowed and the deadline it must now
-// end by (zero: none). Disallowed streams are closed; others keep the
-// earlier of their old and new deadlines.
-func (t *streamTable) recheck(deviceID string, now time.Time, check func(ip string) (bool, time.Time)) {
+// recheck re-evaluates each of a device's open streams with check.
+// Disallowed streams are closed; the others take the network check reports
+// and keep the earlier of their old and new deadlines.
+//
+// check runs without the table locked (it evaluates policy, which can be
+// slow), on a snapshot; verdicts are applied to the streams still open.
+// Streams that open meanwhile were authorized under the state check sees.
+func (t *streamTable) recheck(deviceID string, now time.Time, check func(streamAuth) streamVerdict) {
+	t.recheckMu.Lock()
+	defer t.recheckMu.Unlock()
+	t.mu.Lock()
+	snapshot := make(map[uint64]streamAuth, len(t.byDevice[deviceID]))
+	for id, st := range t.byDevice[deviceID] {
+		snapshot[id] = st.streamAuth
+	}
+	t.mu.Unlock()
+
+	verdicts := make(map[uint64]streamVerdict, len(snapshot))
+	for id, a := range snapshot {
+		verdicts[id] = check(a)
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for id, st := range t.byDevice[deviceID] {
-		ok, deadline := check(st.ip)
-		if !ok {
+	m := t.byDevice[deviceID]
+	for id, v := range verdicts {
+		st := m[id]
+		if st == nil {
+			continue // finished meanwhile
+		}
+		if !v.allowed {
 			st.cancel()
-			delete(t.byDevice[deviceID], id)
+			delete(m, id)
 			continue
 		}
-		if !deadline.IsZero() && (st.deadline.IsZero() || deadline.Before(st.deadline)) {
-			st.deadline = deadline
+		st.network = v.network
+		if !v.deadline.IsZero() && (st.deadline.IsZero() || v.deadline.Before(st.deadline)) {
+			st.deadline = v.deadline
 			t.arm(st, now)
 		}
+	}
+	if len(m) == 0 {
+		delete(t.byDevice, deviceID)
 	}
 }
 

@@ -148,13 +148,21 @@ func (g *Gate) verifyDevice(dev *Device, msg, sig []byte) bool {
 // handleLogout ends the session it was called with, and closes the
 // streams that session opened.
 func (g *Gate) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Same order as other changes that take access away (see accessChanged).
+	var ended []string
 	if t := r.Header.Get(sessionHeader); t != "" {
 		g.sessions.remove(t)
-		g.streams.cancelSession(hashToken(t))
+		ended = append(ended, hashToken(t))
 	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		g.sessions.remove(c.Value)
-		g.streams.cancelSession(hashToken(c.Value))
+		ended = append(ended, hashToken(c.Value))
+	}
+	if len(ended) > 0 {
+		g.accessChanged()
+		for _, h := range ended {
+			g.streams.cancelSession(h)
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
 		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
@@ -457,6 +465,9 @@ func (g *Gate) handleRevokeDevice(w http.ResponseWriter, r *http.Request, key *A
 	// locked out (sessions dropped, streams closed) even if the save fails,
 	// rather than leaving it working until someone notices the error.
 	g.unsavedRevocations.Store(id, struct{}{})
+	// Every way in (sessions, grants, certificates) checks activeDevice,
+	// which already refuses this device, so nothing cached can authorize it.
+	g.accessChanged()
 	err := g.store.Update(func(d *storeData) error {
 		dev, ok := d.Devices[id]
 		if !ok {

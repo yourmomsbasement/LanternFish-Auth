@@ -299,6 +299,7 @@ func (g *Gate) policiesChanged() {
 		return
 	}
 	g.grants.clear()
+	g.accessChanged()
 	g.recheckStreams()
 }
 
@@ -490,6 +491,9 @@ func (g *Gate) handleSubjectStatus(status string) adminHandler {
 			for _, dev := range devices {
 				g.sessions.removeDevice(dev)
 				g.grants.removeDevice(dev)
+			}
+			g.accessChanged()
+			for _, dev := range devices {
 				g.streams.cancelDevice(dev)
 				g.verifications.removeDevice(dev)
 			}
@@ -562,7 +566,8 @@ func (g *Gate) handleAssignProfile(w http.ResponseWriter, r *http.Request, key *
 	// The device's sessions now carry another policy's version, so they are
 	// re-checked on their next request; grants and streams are re-checked now.
 	g.grants.removeDevice(id)
-	g.recheckStreams()
+	g.accessChanged()
+	g.recheckDeviceStreams(id)
 	g.audit.write(g.cfg.Now(), "device_profile_assigned", map[string]any{"device_id": id, "profile_id": req.ProfileID,
 		"admin_key": key.Name, "ip": clientIP(r)})
 	w.WriteHeader(http.StatusNoContent)
@@ -603,7 +608,11 @@ func (g *Gate) handleDeleteNetwork(w http.ResponseWriter, r *http.Request, key *
 	}
 	g.sessions.removeDeviceNetworksExcept(id, keep)
 	g.grants.removeDeviceNetworksExcept(id, keep)
+	g.accessChanged()
 	g.streams.cancelDeviceNetworksExcept(id, keep)
+	// SECURITY: streams are also judged afresh, rather than only by the
+	// network recorded on them, so none survives on the withdrawn network.
+	g.recheckDeviceStreams(id)
 	g.audit.write(g.cfg.Now(), "network_approval_removed", map[string]any{"device_id": id, "network": network,
 		"admin_key": key.Name, "ip": clientIP(r)})
 	w.WriteHeader(http.StatusNoContent)

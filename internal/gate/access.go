@@ -31,7 +31,7 @@ type decision struct {
 	pol     *compiledPolicy
 	network string    // the request's network key under pol
 	expires time.Time // the end of what is authorized (schedule close, approval expiry); zero: none
-	hardEnd time.Time // schedule close only; zero: none within the horizon
+	hardEnd time.Time // schedule close only (or when to re-check it); zero: none
 	geo     geoResult // when the policy uses location
 	// required lists the factors an outVerify decision needs.
 	required []string
@@ -171,7 +171,7 @@ func (g *Gate) evaluateAt(dev *Device, pol *compiledPolicy, ip, network string, 
 		d.outcome, d.reason = outDeny, "outside_schedule"
 		return d
 	}
-	if end, ok := pol.schedule.nextChange(now, scheduleHorizon); ok {
+	if end, ok := pol.schedule.nextBoundary(now); ok {
 		d.hardEnd, d.expires = end, end
 	}
 	stepUp := ""
@@ -318,6 +318,7 @@ func (g *Gate) approveNetwork(dev *Device, ip string, d decision, method string,
 	if pol.IP.Enabled {
 		g.sessions.removeDeviceNetworksExcept(dev.ID, keep)
 		g.grants.removeDeviceNetworksExcept(dev.ID, keep)
+		g.accessChanged()
 		g.streams.cancelDeviceNetworksExcept(dev.ID, keep)
 	}
 	g.audit.write(now, "network_approved", map[string]any{"device_id": dev.ID, "network": d.network,
@@ -395,6 +396,7 @@ type requestAuth struct {
 	dev     *Device
 	how     string
 	network string
+	issued  time.Time // when the session or grant was issued
 	expires time.Time // the session's or grant's end
 	hardEnd time.Time
 	pol     *compiledPolicy
@@ -439,9 +441,12 @@ func (g *Gate) authorizeRequest(w http.ResponseWriter, r *http.Request) *request
 		}
 		pol := g.policyFor(certDev)
 		network := networkKey(ip, pol.Policy.IP)
+		// A cached grant still needs an active owner (defence in depth: a
+		// disable drops grants too), and the country it was issued in.
 		country := g.enforcedCountry(pol, ip, now)
-		if gr, ok := g.grants.lookup(certDev.ID, network, now); ok && gr.version == pol.Version && gr.country == country {
-			return &requestAuth{dev: certDev, how: authCertificate, network: network, expires: gr.expires, hardEnd: gr.hardEnd, pol: pol}
+		if gr, ok := g.grants.lookup(certDev.ID, network, now); ok && gr.version == pol.Version && gr.country == country && g.subjectActive(certDev.SubjectID) {
+			return &requestAuth{dev: certDev, how: authCertificate, network: network, issued: gr.issued,
+				expires: gr.expires, hardEnd: gr.hardEnd, pol: pol}
 		}
 		// The certificate proved possession of the key on this connection.
 		d := g.authorizeKeyProof(certDev, ip, now)
@@ -454,9 +459,10 @@ func (g *Gate) authorizeRequest(w http.ResponseWriter, r *http.Request) *request
 			return nil
 		}
 		exp := earliest(now.Add(d.pol.sessionTTL()), d.expires)
-		g.grants.put(certDev.ID, d.network, grant{expires: exp, version: d.pol.Version, hardEnd: d.hardEnd,
+		g.grants.put(certDev.ID, d.network, grant{issued: now, expires: exp, version: d.pol.Version, hardEnd: d.hardEnd,
 			country: g.enforcedCountry(d.pol, ip, now)}, now)
-		return &requestAuth{dev: certDev, how: authCertificate, network: d.network, expires: exp, hardEnd: d.hardEnd, pol: d.pol}
+		return &requestAuth{dev: certDev, how: authCertificate, network: d.network, issued: now, expires: exp,
+			hardEnd: d.hardEnd, pol: d.pol}
 	}
 
 	s, ok := g.sessions.lookup(token, now)
@@ -508,10 +514,23 @@ func (g *Gate) authorizeRequest(w http.ResponseWriter, r *http.Request) *request
 		}
 		expires = earliest(earliest(s.expires, s.issued.Add(pol.sessionTTL())), d.expires)
 		hardEnd = d.hardEnd
-		g.sessions.reauthorize(token, pol.Version, network, expires, hardEnd)
+		// SECURITY: a shorter lifetime can leave the session already
+		// expired under the new policy. End it now; don't let it through
+		// once more because the check above used the old expiry.
+		if !now.Before(expires) {
+			g.sessions.remove(token)
+			g.unauthenticated(w, r, "")
+			return nil
+		}
+		// The session may have been removed (logout, revocation) since it
+		// was looked up; then it authorizes nothing.
+		if !g.sessions.reauthorize(token, pol.Version, network, expires, hardEnd) {
+			g.unauthenticated(w, r, "")
+			return nil
+		}
 		g.sessions.setCountry(token, g.enforcedCountry(pol, ip, now))
 	}
-	return &requestAuth{dev: dev, how: how, network: network, expires: expires, hardEnd: hardEnd, pol: pol,
+	return &requestAuth{dev: dev, how: how, network: network, issued: s.issued, expires: expires, hardEnd: hardEnd, pol: pol,
 		sessionHash: hashToken(token)}
 }
 
@@ -588,19 +607,43 @@ func (g *Gate) denyRequest(w http.ResponseWriter, r *http.Request, d decision) {
 // recheckStreams re-evaluates every open stream under the current policies,
 // closing those no longer allowed and tightening deadlines.
 func (g *Gate) recheckStreams() {
-	now := g.cfg.Now()
 	for _, id := range g.streams.devices() {
-		dev := g.activeDevice(id)
-		if dev == nil {
-			g.streams.cancelDevice(id)
-			continue
-		}
-		g.streams.recheck(id, now, func(ip string) (bool, time.Time) {
-			d := g.evaluate(dev, ip, now)
-			if d.outcome != outAllow {
-				return false, time.Time{}
-			}
-			return true, d.hardEnd
-		})
+		g.recheckDeviceStreams(id)
 	}
+}
+
+// recheckDeviceStreams re-evaluates one device's open streams.
+//
+// SECURITY: each stream is judged as if it were a new request from its
+// client address under the current policy, not by what was recorded when it
+// opened:
+//   - its network is re-derived and stored, so a stream opened while network
+//     binding was off is bound once it is turned on, and removing that
+//     network's approval closes it;
+//   - in strict mode its deadline is its credential's end under the current
+//     lifetime (issue time plus the policy's session lifetime), so switching
+//     to strict, or shortening the lifetime, tightens streams that are
+//     already open.
+func (g *Gate) recheckDeviceStreams(id string) {
+	now := g.cfg.Now()
+	dev := g.activeDevice(id)
+	if dev == nil {
+		g.streams.cancelDevice(id)
+		return
+	}
+	g.streams.recheck(id, now, func(sa streamAuth) streamVerdict {
+		d := g.evaluate(dev, sa.ip, now)
+		if d.outcome != outAllow {
+			return streamVerdict{}
+		}
+		deadline := d.hardEnd
+		if d.pol.Policy.Session.StreamExpiryMode == streamStrict {
+			end := sa.issued.Add(d.pol.sessionTTL())
+			if !sa.expires.IsZero() {
+				end = earliest(end, sa.expires)
+			}
+			deadline = earliest(earliest(deadline, d.expires), end)
+		}
+		return streamVerdict{allowed: true, deadline: deadline, network: d.network}
+	})
 }
