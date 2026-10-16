@@ -11,8 +11,9 @@
 # environment or ~/.config/lanternfish/sign.env:
 #   LANTERNFISH_SIGNING_KEY   encrypted private key (default ~/.config/lanternfish/release-key.pem)
 #   LANTERNFISH_REPO          owner/name (default yourmomsbasement/LanternFish-Auth)
-#   GITHUB_TOKEN_FILE         token for uploads (default ~/.config/lanternfish/github-token, mode 600);
-#                             a fine-grained token for this repository with Contents: read and write
+#   GITHUB_TOKEN_FILE         token for uploads (default ~/.config/lanternfish/github-token, mode 600):
+#                             a fine-grained token for this repository with Contents: read and write.
+#                             Without one, the GitHub CLI's login is used if `gh` is logged in.
 #   LANTERNFISH_ALERT_WEBHOOK Discord webhook for "notify"
 #
 # The key never leaves this machine and is never decrypted to disk. Each run
@@ -39,11 +40,20 @@ done
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-TOKEN=""
+# GitHub API access, for uploads: a token file, or else the GitHub CLI's login
+# (`gh auth login`). SSH keys can't be used: they only work for git itself.
+TOKEN="" TOKEN_SOURCE=""
 if [ -f "$TOKEN_FILE" ]; then
   perms=$(stat -c %a "$TOKEN_FILE" 2>/dev/null || stat -f %Lp "$TOKEN_FILE")
   [ "${perms: -2}" = "00" ] || die "$TOKEN_FILE is readable by other users; chmod 600 it"
   TOKEN=$(tr -d '[:space:]' < "$TOKEN_FILE")
+  TOKEN_SOURCE="the token in $TOKEN_FILE"
+  case "$TOKEN" in
+    ssh-*|ecdsa-*|-----BEGIN*) die "$TOKEN_FILE holds an SSH key; that only works for git. Use a GitHub API token, or log in with: gh auth login" ;;
+  esac
+elif [ "$API" = "https://api.github.com" ] && command -v gh >/dev/null && gh auth status --hostname github.com >/dev/null 2>&1; then
+  TOKEN=$(gh auth token --hostname github.com)
+  TOKEN_SOURCE="your GitHub CLI login"
 fi
 
 # Passphrase: asked once per run, handed to openssl through the environment
@@ -65,7 +75,7 @@ api() { # api PATH -> JSON on stdout; on failure, says why on stderr
   msg=$(jq -r '.message // empty' "$WORK/api.out" 2>/dev/null || true)
   echo "sign-releases: GitHub answered $code${msg:+: $msg}" >&2
   case "$code" in
-    401) echo "  The token in $TOKEN_FILE is wrong or expired. Make a new one (Contents: Read and write on $REPO)." >&2 ;;
+    401) echo "  GitHub doesn't accept $TOKEN_SOURCE: it's wrong or expired." >&2 ;;
     403) echo "  Rate-limited or not allowed. With a token: check it can access $REPO." >&2 ;;
     404) echo "  No repository $REPO visible to this token. Check LANTERNFISH_REPO, and that the token's" \
               "repository access includes $REPO." >&2 ;;
@@ -176,7 +186,7 @@ check_release() {
 
 upload_sig() { # upload_sig REL_JSON FILE
   local url code
-  [ -n "$TOKEN" ] || die "uploading needs a GitHub token in $TOKEN_FILE"
+  [ -n "$TOKEN" ] || die "uploading needs a GitHub token in $TOKEN_FILE, or the GitHub CLI logged in (gh auth login)"
   url=$(jq -r .upload_url <<<"$1"); url=${url%%\{*}
   code=$(curl -sS -o "$WORK/upload.out" -w '%{http_code}' -X POST \
     -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
@@ -185,7 +195,7 @@ upload_sig() { # upload_sig REL_JSON FILE
   case "$code" in
     201) ;;
     422) die "$(jq -r .tag_name <<<"$1") already has a $SIG" ;;
-    401) die "upload refused (401): the token in $TOKEN_FILE is wrong or expired" ;;
+    401) die "upload refused (401): GitHub doesn't accept $TOKEN_SOURCE (wrong or expired)" ;;
     403|404) die "upload refused ($code: $(jq -r '.message // "no reason given"' "$WORK/upload.out" 2>/dev/null)). The token needs" \
                  "Repository access including $REPO, and the permission Contents: Read and write" ;;
     *) die "upload failed ($code): $(head -c 300 "$WORK/upload.out")" ;;
@@ -243,7 +253,7 @@ cmd_sign() {
       upload_sig "$rel" "$d/$SIG"
       echo "$tag: signed and uploaded$(jq -r 'if .draft then " (draft: publish it on GitHub)" else "" end' <<<"$rel")." >&2
     else
-      echo "$tag: signed. No token, so attach signed/$tag/$SIG to the release by hand." >&2
+      echo "$tag: signed. No GitHub login (token file or gh auth login), so attach signed/$tag/$SIG to the release by hand." >&2
     fi
     i=$((i + 1))
   done
