@@ -119,9 +119,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -130,8 +127,7 @@ jobs:
         run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
       - name: Release manifest (signed offline afterwards; see docs/RELEASES.md)
         run: |
-          files=$(cd dist && ls)
-          go run ./cmd/lanternfish-gate release-manifest -version "$GITHUB_REF_NAME" -dir dist $files > lanternfish-release.json
+          bash scripts/release-manifest.sh "$GITHUB_REF_NAME" dist > lanternfish-release.json
           mv lanternfish-release.json dist/
           cat dist/lanternfish-release.json
       - name: Create release

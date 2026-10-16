@@ -37,11 +37,8 @@ const usage = `Usage:
   lanternfish-gate upstream-key              Print the key for Jellyfin's Lanternfish plugin
   lanternfish-gate version                   Print the version
 
-Releases and updates (see docs/RELEASES.md):
-  lanternfish-gate release-key generate -out FILE   New passphrase-protected signing key
-  lanternfish-gate release-sign -key FILE -tag vX.Y.Z
-                                             Check a GitHub release's files and sign its manifest
-  lanternfish-gate release-verify MANIFEST SIGNATURE
+Updates (signed releases only; see docs/RELEASES.md):
+  lanternfish-gate release-verify MANIFEST SIGNATURE   Check a release signature by hand
   lanternfish-gate update check              Show the newest verified release
   lanternfish-gate update apply [-version X] Install it (root; normally done by the updater service)
 
@@ -88,12 +85,6 @@ func main() {
 		err = deviceCA()
 	case "upstream-key":
 		err = upstreamKey()
-	case "release-key":
-		err = releaseKey(args[1:])
-	case "release-manifest":
-		err = releaseManifest(args[1:])
-	case "release-sign":
-		err = releaseSign(args[1:])
 	case "release-verify":
 		err = releaseVerify(args[1:])
 	case "update":

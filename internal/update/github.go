@@ -255,35 +255,3 @@ func (s *Source) Download(ctx context.Context, rel *Release, name string) ([]byt
 	}
 	return data, f.Check(data)
 }
-
-// Unverified fetches a release's manifest, and a getter for its files, before
-// it is signed: release-sign uses it to check the files it is about to sign.
-func (s *Source) Unverified(ctx context.Context, tag string) ([]byte, func(name string) ([]byte, error), error) {
-	rs, err := s.releases(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	for _, r := range rs {
-		if r.Tag != tag {
-			continue
-		}
-		assets := map[string]string{}
-		for _, a := range r.Assets {
-			assets[a.Name] = a.URL
-		}
-		if assets[ManifestName] == "" {
-			return nil, nil, errors.New("no " + ManifestName + " attached to " + tag + " (is the release workflow finished?)")
-		}
-		manifest, err := s.get(ctx, assets[ManifestName], maxManifest)
-		if err != nil {
-			return nil, nil, err
-		}
-		return manifest, func(name string) ([]byte, error) {
-			if assets[name] == "" {
-				return nil, errors.New("not attached to the release")
-			}
-			return s.get(ctx, assets[name], maxArchive)
-		}, nil
-	}
-	return nil, nil, fmt.Errorf("release %s not found (drafts aren't visible without a token)", tag)
-}

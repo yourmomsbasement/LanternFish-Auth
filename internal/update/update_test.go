@@ -6,6 +6,10 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,51 +23,52 @@ import (
 	"time"
 )
 
-const testPass = "correct horse battery"
-
-func init() { kdfIterations = 100000 } // the minimum OpenKey accepts; keeps tests quick
+// The tests sign as scripts/sign-releases.sh does: plain Ed25519 over
+// SignedMessage(manifest), wrapped in the signature file's JSON.
 
 func testKey(t *testing.T) (ed25519.PrivateKey, []PublicKey) {
 	t.Helper()
-	file, pub, err := GenerateKey(testPass)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	priv, err := OpenKey(file, testPass)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keys, err := ParsePublicKeys([]byte("# trusted\n" + FormatPublicKey(pub, "test key") + "\n"))
+	line := "lfrk1 " + base64.StdEncoding.EncodeToString(pub) + " test key"
+	keys, err := ParsePublicKeys([]byte("# trusted\n" + line + "\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return priv, keys
 }
 
-func TestKeyFileAndSignatures(t *testing.T) {
-	file, _, err := GenerateKey(testPass)
-	if err != nil {
-		t.Fatal(err)
+func testManifest(t *testing.T, dir, version string, names ...string) []byte {
+	t.Helper()
+	m := Manifest{Schema: 1, Product: Product, Version: strings.TrimPrefix(version, "v"), Published: time.Now().UTC()}
+	for _, n := range names {
+		data, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(data)
+		m.Files = append(m.Files, File{Name: n, SHA256: hex.EncodeToString(sum[:]), Size: int64(len(data))})
 	}
-	if _, err := OpenKey(file, "wrong passphrase!"); err == nil {
-		t.Fatal("opened with the wrong passphrase")
-	}
-	if _, _, err := GenerateKey("short"); err == nil {
-		t.Fatal("accepted a short passphrase")
-	}
+	out, _ := json.MarshalIndent(m, "", "  ")
+	return append(out, '\n')
+}
+
+func testSign(priv ed25519.PrivateKey, manifest []byte) []byte {
+	sig, _ := json.Marshal(Signature{KeyID: KeyID(priv.Public().(ed25519.PublicKey)),
+		Sig: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, SignedMessage(manifest)))})
+	return sig
+}
+
+func TestSignatures(t *testing.T) {
 	priv, keys := testKey(t)
 	_, otherKeys := testKey(t)
 
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "a.tar.gz"), []byte("archive"), 0o644)
-	manifest, err := BuildManifest(dir, "v1.2.3", []string{"a.tar.gz"}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sig, err := Sign(priv, manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	manifest := testManifest(t, dir, "v1.2.3", "a.tar.gz")
+	sig := testSign(priv, manifest)
 	m, signer, err := Verify(manifest, sig, keys)
 	if err != nil || m.Version != "1.2.3" || signer != "test key" {
 		t.Fatalf("verify: %v %v %q", m, err, signer)
@@ -126,7 +131,7 @@ type fakeRelease struct {
 func fakeGitHub(t *testing.T, rels ...fakeRelease) *httptest.Server {
 	t.Helper()
 	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/repos/o/r/releases" {
 			var out []map[string]any
 			for _, rel := range rels {
@@ -151,6 +156,7 @@ func fakeGitHub(t *testing.T, rels ...fakeRelease) *httptest.Server {
 		}
 		http.NotFound(w, r)
 	}))
+	srv.Start()
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -181,13 +187,10 @@ func signedRelease(t *testing.T, priv ed25519.PrivateKey, tag, manifestVersion s
 	name := ArchiveName(manifestVersion, runtime.GOOS, runtime.GOARCH)
 	archive := fakeArchive(t, manifestVersion)
 	os.WriteFile(filepath.Join(dir, name), archive, 0o644)
-	manifest, err := BuildManifest(dir, manifestVersion, []string{name}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manifest := testManifest(t, dir, manifestVersion, name)
 	files := map[string][]byte{name: archive, ManifestName: manifest}
 	if sign {
-		sig, _ := Sign(priv, manifest)
+		sig := testSign(priv, manifest)
 		files[SignatureName] = sig
 	}
 	return fakeRelease{tag: tag, files: files}

@@ -1,20 +1,16 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
-	"time"
 
 	"github.com/yourmomsbasement/lanternfish-auth/internal/gate"
 	"github.com/yourmomsbasement/lanternfish-auth/internal/update"
@@ -56,160 +52,6 @@ func gateUpdates() *gate.Updates {
 	return &gate.Updates{Source: src, KeysError: keysErr, KeysPath: env("LANTERNFISH_RELEASE_KEYS", defaultKeysPath),
 		RequestPath: requestPath(), StatusPath: env("LANTERNFISH_UPDATE_STATUS", defaultStatusPath),
 		UnitPath: updaterUnit, AutoPolicy: env("LANTERNFISH_AUTO_UPDATE", "off"), Prerelease: pre}
-}
-
-// readPassphrase reads the release key passphrase from
-// LANTERNFISH_RELEASE_PASSPHRASE or the terminal, without echo.
-func readPassphrase(prompt string) (string, error) {
-	if p := os.Getenv("LANTERNFISH_RELEASE_PASSPHRASE"); p != "" {
-		return p, nil
-	}
-	fmt.Fprint(os.Stderr, prompt)
-	if st, err := os.Stdin.Stat(); err == nil && st.Mode()&os.ModeCharDevice != 0 {
-		stty := func(arg string) error {
-			c := exec.Command("stty", arg)
-			c.Stdin = os.Stdin
-			return c.Run()
-		}
-		if stty("-echo") == nil {
-			defer func() { stty("echo"); fmt.Fprintln(os.Stderr) }()
-		}
-	}
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil && line == "" {
-		return "", err
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
-
-func releaseKey(args []string) error {
-	if len(args) == 0 || args[0] != "generate" {
-		return errors.New("usage: lanternfish-gate release-key generate -out FILE [-comment TEXT]")
-	}
-	fs := flag.NewFlagSet("release-key generate", flag.ExitOnError)
-	out := fs.String("out", "", "where to write the encrypted private key")
-	comment := fs.String("comment", "", "label for the public key, e.g. your name and the date")
-	fs.Parse(args[1:])
-	if *out == "" {
-		return errors.New("-out is required")
-	}
-	if _, err := os.Stat(*out); err == nil {
-		return fmt.Errorf("%s exists; refusing to overwrite a key", *out)
-	}
-	pass, err := readPassphrase("Passphrase for the new release key (12+ characters): ")
-	if err != nil {
-		return err
-	}
-	again, err := readPassphrase("Repeat it: ")
-	if err != nil {
-		return err
-	}
-	if pass != again {
-		return errors.New("the passphrases differ")
-	}
-	file, pub, err := update.GenerateKey(pass)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(*out, file, 0o600); err != nil {
-		return err
-	}
-	c := *comment
-	if c == "" {
-		c = "release key " + time.Now().Format("2006-01-02")
-	}
-	fmt.Fprintf(os.Stderr, "Wrote the encrypted private key to %s (key ID %s). Back it up offline; never upload it.\n", *out, update.KeyID(pub))
-	fmt.Fprintln(os.Stderr, "Public key (put this line in /etc/lanternfish/release-keys on the Gate):")
-	fmt.Println(update.FormatPublicKey(pub, c))
-	return nil
-}
-
-// releaseManifest is run by CI to list the release's files.
-func releaseManifest(args []string) error {
-	fs := flag.NewFlagSet("release-manifest", flag.ExitOnError)
-	ver := fs.String("version", "", "release version, e.g. v0.3.0")
-	dir := fs.String("dir", ".", "directory holding the files")
-	fs.Parse(args)
-	names := fs.Args()
-	if *ver == "" || len(names) == 0 {
-		return errors.New("usage: lanternfish-gate release-manifest -version vX.Y.Z -dir DIR FILE...")
-	}
-	m, err := update.BuildManifest(*dir, *ver, names, time.Now())
-	if err != nil {
-		return err
-	}
-	_, err = os.Stdout.Write(m)
-	return err
-}
-
-// releaseSign signs a release's manifest after checking the files it lists:
-// downloaded from GitHub with -tag, or in a local -dir.
-func releaseSign(args []string) error {
-	fs := flag.NewFlagSet("release-sign", flag.ExitOnError)
-	keyPath := fs.String("key", "", "encrypted release key")
-	tag := fs.String("tag", "", "download the release with this tag from GitHub and check its files")
-	dir := fs.String("dir", "", "check the files in this directory instead")
-	out := fs.String("out", update.SignatureName, "where to write the signature")
-	fs.Parse(args)
-	if *keyPath == "" || (*tag == "") == (*dir == "") {
-		return errors.New("usage: lanternfish-gate release-sign -key FILE (-tag vX.Y.Z | -dir DIR)")
-	}
-	keyFile, err := os.ReadFile(*keyPath)
-	if err != nil {
-		return err
-	}
-	var manifest []byte
-	var files func(name string) ([]byte, error)
-	if *tag != "" {
-		src := &update.Source{Repo: env("LANTERNFISH_UPDATE_REPO", defaultUpdateRepo), API: os.Getenv("LANTERNFISH_UPDATE_API")}
-		ctx := context.Background()
-		manifest, files, err = src.Unverified(ctx, *tag)
-		if err != nil {
-			return err
-		}
-	} else {
-		if manifest, err = os.ReadFile(filepath.Join(*dir, update.ManifestName)); err != nil {
-			return err
-		}
-		files = func(name string) ([]byte, error) { return os.ReadFile(filepath.Join(*dir, name)) }
-	}
-	m, err := update.ParseManifest(manifest)
-	if err != nil {
-		return err
-	}
-	if *tag != "" {
-		if v, _ := update.ParseVersion(*tag); v.String() != m.Version {
-			return fmt.Errorf("the manifest is for %s, not %s", m.Version, *tag)
-		}
-	}
-	// Sign only what we have checked: every listed file must match.
-	for _, f := range m.Files {
-		data, err := files(f.Name)
-		if err != nil {
-			return fmt.Errorf("%s: %w", f.Name, err)
-		}
-		if err := f.Check(data); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "ok  %s  %s\n", f.SHA256[:16], f.Name)
-	}
-	pass, err := readPassphrase("Release key passphrase: ")
-	if err != nil {
-		return err
-	}
-	priv, err := update.OpenKey(keyFile, pass)
-	if err != nil {
-		return err
-	}
-	sig, err := update.Sign(priv, manifest)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(*out, sig, 0o644); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "Signed %s %s. Attach %s to the GitHub release.\n", update.Product, m.Version, *out)
-	return nil
 }
 
 func releaseVerify(args []string) error {

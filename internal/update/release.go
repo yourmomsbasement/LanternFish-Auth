@@ -2,9 +2,9 @@
 //
 // A release carries a manifest (lanternfish-release.json) listing every file
 // with its SHA-256 and size, and a detached Ed25519 signature over it
-// (lanternfish-release.json.sig). The signing key stays offline with the
-// administrator, encrypted under a passphrase; CI only builds and lists the
-// files. Installations trust the public keys in /etc/lanternfish/release-keys.
+// (lanternfish-release.json.sig). Signing happens outside this program, on the
+// maintainer's machine (scripts/sign-releases.sh); Gates only verify, against
+// the public keys in /etc/lanternfish/release-keys.
 //
 // SECURITY: the manifest names its own version, and a manifest is only
 // accepted for the release tag it claims, so an old signed release can't be
@@ -14,11 +14,7 @@ package update
 import (
 	"bufio"
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ed25519"
-	"crypto/pbkdf2"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -26,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -39,11 +34,13 @@ const (
 
 	signContext  = "lanternfish-release/v1\n"
 	publicPrefix = "lfrk1"
-	keyFileType  = "lanternfish-release-key/v1"
 )
 
-// kdfIterations protects the signing key's passphrase; tests lower it.
-var kdfIterations = 600000
+// SignedMessage is what a release signature covers: a fixed context line,
+// then the manifest file's exact bytes.
+func SignedMessage(manifest []byte) []byte {
+	return append([]byte(signContext), manifest...)
+}
 
 // Manifest lists a release's files.
 type Manifest struct {
@@ -74,11 +71,6 @@ type PublicKey struct {
 func KeyID(pub ed25519.PublicKey) string {
 	sum := sha256.Sum256(pub)
 	return hex.EncodeToString(sum[:8])
-}
-
-// FormatPublicKey renders a key as one line for a release-keys file.
-func FormatPublicKey(pub ed25519.PublicKey, comment string) string {
-	return strings.TrimSpace(publicPrefix + " " + base64.StdEncoding.EncodeToString(pub) + " " + comment)
 }
 
 // ParsePublicKeys reads a release-keys file: one "lfrk1 <base64> [comment]"
@@ -119,117 +111,6 @@ func LoadPublicKeys(path string) ([]PublicKey, error) {
 	return keys, nil
 }
 
-// ---- Private key file ----
-
-type keyFile struct {
-	Type       string `json:"type"`
-	Public     string `json:"public"`
-	KDF        string `json:"kdf"`
-	Iterations int    `json:"iterations"`
-	Salt       string `json:"salt"`
-	Nonce      string `json:"nonce"`
-	Sealed     string `json:"sealed_seed"`
-}
-
-// GenerateKey returns a new signing key, encrypted under passphrase
-// (PBKDF2-SHA256, AES-256-GCM), and its public key.
-func GenerateKey(passphrase string) (file []byte, pub ed25519.PublicKey, err error) {
-	if len(passphrase) < 12 {
-		return nil, nil, errors.New("use a passphrase of at least 12 characters")
-	}
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, nil, err
-	}
-	salt := make([]byte, 16)
-	nonce := make([]byte, 12)
-	rand.Read(salt)
-	rand.Read(nonce)
-	aead, err := keyAEAD(passphrase, salt, kdfIterations)
-	if err != nil {
-		return nil, nil, err
-	}
-	kf := keyFile{Type: keyFileType, Public: base64.StdEncoding.EncodeToString(pub), KDF: "pbkdf2-sha256",
-		Iterations: kdfIterations, Salt: base64.StdEncoding.EncodeToString(salt),
-		Nonce:  base64.StdEncoding.EncodeToString(nonce),
-		Sealed: base64.StdEncoding.EncodeToString(aead.Seal(nil, nonce, priv.Seed(), []byte(keyFileType)))}
-	file, err = json.MarshalIndent(kf, "", "  ")
-	return append(file, '\n'), pub, err
-}
-
-func keyAEAD(passphrase string, salt []byte, iterations int) (cipher.AEAD, error) {
-	k, err := pbkdf2.Key(sha256.New, passphrase, salt, iterations, 32)
-	if err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(k)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
-}
-
-// OpenKey decrypts a key file.
-func OpenKey(file []byte, passphrase string) (ed25519.PrivateKey, error) {
-	var kf keyFile
-	if err := json.Unmarshal(file, &kf); err != nil || kf.Type != keyFileType || kf.KDF != "pbkdf2-sha256" {
-		return nil, errors.New("not a Lanternfish release key file")
-	}
-	if kf.Iterations < 100000 || kf.Iterations > 10000000 {
-		return nil, errors.New("key file has an unreasonable iteration count")
-	}
-	salt, err1 := base64.StdEncoding.DecodeString(kf.Salt)
-	nonce, err2 := base64.StdEncoding.DecodeString(kf.Nonce)
-	sealed, err3 := base64.StdEncoding.DecodeString(kf.Sealed)
-	if err := errors.Join(err1, err2, err3); err != nil {
-		return nil, errors.New("key file is damaged")
-	}
-	aead, err := keyAEAD(passphrase, salt, kf.Iterations)
-	if err != nil {
-		return nil, err
-	}
-	if len(nonce) != aead.NonceSize() {
-		return nil, errors.New("key file is damaged")
-	}
-	seed, err := aead.Open(nil, nonce, sealed, []byte(keyFileType))
-	if err != nil || len(seed) != ed25519.SeedSize {
-		return nil, errors.New("wrong passphrase, or the key file is damaged")
-	}
-	return ed25519.NewKeyFromSeed(seed), nil
-}
-
-// ---- Manifests ----
-
-// BuildManifest lists the named files in dir.
-func BuildManifest(dir, version string, names []string, now time.Time) ([]byte, error) {
-	m := Manifest{Schema: 1, Product: Product, Version: strings.TrimPrefix(version, "v"), Published: now.UTC().Truncate(time.Second)}
-	if _, err := ParseVersion(m.Version); err != nil {
-		return nil, err
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		data, err := os.ReadFile(dir + string(os.PathSeparator) + n)
-		if err != nil {
-			return nil, err
-		}
-		sum := sha256.Sum256(data)
-		m.Files = append(m.Files, File{Name: n, SHA256: hex.EncodeToString(sum[:]), Size: int64(len(data))})
-	}
-	out, err := json.MarshalIndent(m, "", "  ")
-	return append(out, '\n'), err
-}
-
-// Sign returns the detached signature for manifest bytes.
-func Sign(priv ed25519.PrivateKey, manifest []byte) ([]byte, error) {
-	if _, err := ParseManifest(manifest); err != nil {
-		return nil, err
-	}
-	sig := Signature{KeyID: KeyID(priv.Public().(ed25519.PublicKey)),
-		Sig: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, append([]byte(signContext), manifest...)))}
-	out, err := json.MarshalIndent(sig, "", "  ")
-	return append(out, '\n'), err
-}
-
 // ParseManifest parses a manifest without checking any signature.
 func ParseManifest(data []byte) (*Manifest, error) {
 	var m Manifest
@@ -264,7 +145,7 @@ func Verify(manifest, signature []byte, keys []PublicKey) (*Manifest, string, er
 		return nil, "", errors.New("signature file is malformed")
 	}
 	for _, k := range keys {
-		if KeyID(k.Key) == sig.KeyID && ed25519.Verify(k.Key, append([]byte(signContext), manifest...), raw) {
+		if KeyID(k.Key) == sig.KeyID && ed25519.Verify(k.Key, SignedMessage(manifest), raw) {
 			m, err := ParseManifest(manifest)
 			if err != nil {
 				return nil, "", err

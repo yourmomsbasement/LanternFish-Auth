@@ -173,8 +173,8 @@ release with a `v*` tag on GitHub, and the
 builds the Gate for Linux (amd64, arm64) and Windows, builds the plugin and
 its repository manifest, and publishes everything with `SHA256SUMS` and the
 release manifest. Then sign it from your admin PC with
-`lanternfish-gate release-sign -tag vX.Y.Z` and attach the `.sig`
-([docs/RELEASES.md](docs/RELEASES.md)).
+`scripts/sign-releases.sh sign`, which checks every file and uploads the
+signature ([docs/RELEASES.md](docs/RELEASES.md)).
 
 ## Development
 

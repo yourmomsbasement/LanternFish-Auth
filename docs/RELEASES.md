@@ -1,55 +1,89 @@
 # Signed releases and updates
 
 Gates install only releases whose manifest is signed by a key you trust. The
-signing key never leaves your machine: GitHub builds the release, and you
-sign it after checking the files GitHub built.
+Gate itself only verifies; signing happens on your admin PC with
+[`scripts/sign-releases.sh`](../scripts/sign-releases.sh), and the key never
+leaves that machine.
 
 ```
-GitHub Actions                     you (admin PC)                     Gate (CT 200)
-──────────────                     ──────────────                     ─────────────
-build archives                     release-sign -tag vX.Y.Z           dashboard → Updates → Install
-lanternfish-release.json  ──────►  checks every file's SHA-256 ──►   updater (root) verifies the
-(SHA-256 of every file)            signs with your offline key        signature again, installs,
-                                   upload the .sig to the release     health-checks, rolls back
+GitHub Actions                 admin PC                             Gate (CT 200)
+──────────────                 ────────                             ─────────────
+builds the archives            sign-releases.sh sign                dashboard → Updates → Install
++ lanternfish-release.json ──► downloads every file, checks its ──► updater (root) verifies the
+  (SHA-256 of every file)      SHA-256, signs, uploads the .sig     signature again, installs,
+                                                                    health-checks, rolls back
 ```
+
+The signature is Ed25519 over the line `lanternfish-release/v1`, a newline,
+and the manifest file's exact bytes, stored as
+`{"key_id": "<first 16 hex digits of SHA-256(public key)>", "signature": "<base64>"}`
+in `lanternfish-release.json.sig`.
 
 ## One-time setup
 
-### 1. Create your signing key (on your admin PC)
+### 1. On your admin PC
 
-Use the Linux release of `lanternfish-gate` (it runs anywhere; it doesn't
-need to be the Gate):
+Needs `bash`, `openssl` 1.1.1 or newer, `curl`, `jq` and `sha256sum`
+(Debian/Ubuntu: `apt install openssl curl jq`). Copy
+`scripts/sign-releases.sh` from the repository somewhere on your `PATH`.
 
-```sh
-lanternfish-gate release-key generate -out ~/lanternfish-release.key -comment "yourname 2026"
-```
-
-It asks for a passphrase (12+ characters) and prints the public key line:
-
-```
-lfrk1 jC3F7rgUiYR6ChC9Oy2mN84L1d3HqrZXi1ZRCx85Afw= yourname 2026
-```
-
-* The private key file is encrypted with your passphrase (PBKDF2-SHA256,
-  AES-256-GCM). Keep a copy offline, for example on a USB stick and in your
-  password manager. **Never** upload it to GitHub or put it on the Gate.
-* If you lose it, generate a new one and replace the public key on your
-  Gates. If it leaks, do the same at once, and delete the old line.
-
-### 2. Trust it on the Gate
-
-On CT 200, as root:
+**Create your signing key:**
 
 ```sh
-echo 'lfrk1 jC3F…Afw= yourname 2026' >> /etc/lanternfish/release-keys
+sign-releases.sh keygen
 ```
 
-The file is root-owned and world-readable; it holds only public keys. You
-can list two (your key and a spare kept offline) to rotate without a gap.
+It asks for a passphrase (12+ characters), writes the key to
+`~/.config/lanternfish/release-key.pem` (Ed25519, encrypted PKCS#8 with an
+scrypt-derived key), and prints its public key line:
 
-### 3. Install the updater
+```
+lfrk1 jC3F7rgUiYR6ChC9Oy2mN84L1d3HqrZXi1ZRCx85Afw= you@admin-vm 2026-10-16
+```
 
-`install-gate.sh` from any release since 0.2.0 installs it:
+* Back the key file up offline (a USB stick, your password manager). Never
+  upload it, and never store the passphrase on the machine.
+* If you lose it, make a new one and replace the public key on your Gates.
+  If it leaks, do that at once.
+
+**Let the script upload signatures:** create a fine-grained GitHub token at
+GitHub → Settings → Developer settings → Fine-grained tokens, with access to
+only this repository and the permission **Contents: Read and write** (that's
+what attaching a file to a release needs). Give it an expiry date. Then:
+
+```sh
+install -m 600 /dev/null ~/.config/lanternfish/github-token
+nano ~/.config/lanternfish/github-token     # paste the token
+```
+
+Without a token the script still signs; you then attach
+`signed/<tag>/lanternfish-release.json.sig` to the release by hand.
+
+The token can push to the repository, so protect `main` with a branch rule
+that requires pull requests, and keep the admin PC locked down.
+
+**Optional reminder:** a timer that pings your Discord when a release is
+waiting. Put `LANTERNFISH_ALERT_WEBHOOK=https://discord.com/api/webhooks/...`
+in `~/.config/lanternfish/sign.env`, then add this crontab line
+(`crontab -e`):
+
+```
+0 * * * * /usr/local/bin/sign-releases.sh notify
+```
+
+### 2. On each Gate (CT 200)
+
+Trust your key, as root:
+
+```sh
+echo 'lfrk1 jC3F…Afw= you@admin-vm 2026-10-16' >> /etc/lanternfish/release-keys
+systemctl restart lanternfish-gate
+```
+
+The file holds only public keys. You can list two (your key and a spare kept
+offline) to rotate without a gap.
+
+`install-gate.sh` from any release since 0.2.0 installs the updater:
 
 * `lanternfish-gate-update.path` watches for requests from the dashboard and
   starts `lanternfish-gate-update.service` (root) to install them.
@@ -65,14 +99,16 @@ can list two (your key and a spare kept offline) to rotate without a gap.
 2. When the workflow is green, on your admin PC:
 
    ```sh
-   lanternfish-gate release-sign -key ~/lanternfish-release.key -tag v0.3.0
+   sign-releases.sh pending     # what is waiting
+   sign-releases.sh sign        # all waiting releases (or: sign v0.3.0)
    ```
 
    It downloads the manifest and **every file it lists**, checks each
-   SHA-256, asks for your passphrase, and writes
-   `lanternfish-release.json.sig`. It refuses if anything doesn't match.
-3. Edit the release on GitHub and drag `lanternfish-release.json.sig` into
-   the assets. Gates see the release as soon as it's attached.
+   SHA-256 and size, and only then asks for your passphrase, once. If any
+   file doesn't match, it signs nothing. Each signature is checked before it
+   is uploaded.
+3. Gates see the release as soon as the signature is attached:
+   Dashboard → Updates shows it as verified and signed by your key.
 
 ## Updating a Gate
 
@@ -120,6 +156,7 @@ systemctl start lanternfish-gate
 
 ## Windows
 
-`release-key`, `release-sign` and `update check` work on Windows. Installing
-updates is Linux/systemd only; on Windows, replace the binary by hand after
-`lanternfish-gate release-verify`.
+Gates on Windows don't update themselves. Check a release by hand with
+`lanternfish-gate release-verify -keys release-keys lanternfish-release.json lanternfish-release.json.sig`
+(and the archive against the manifest), then replace the binary. The signing
+script runs on Linux or macOS (or WSL).

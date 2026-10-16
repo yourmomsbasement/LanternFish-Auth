@@ -1,11 +1,15 @@
 package gate
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,18 +19,14 @@ import (
 // fakeReleases serves a GitHub releases API with one signed release.
 func fakeReleases(t *testing.T, version string) ([]update.PublicKey, *httptest.Server) {
 	t.Helper()
-	file, pub, err := update.GenerateKey("correct horse battery")
-	if err != nil {
-		t.Fatal(err)
-	}
-	priv, _ := update.OpenKey(file, "correct horse battery")
-	keys, _ := update.ParsePublicKeys([]byte(update.FormatPublicKey(pub, "maintainer")))
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "a.tar.gz"), []byte("archive"), 0o644)
-	manifest, _ := update.BuildManifest(dir, version, []string{"a.tar.gz"}, time.Now())
-	sig, _ := update.Sign(priv, manifest)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	keys, _ := update.ParsePublicKeys([]byte("lfrk1 " + base64.StdEncoding.EncodeToString(pub) + " maintainer"))
+	manifest, _ := json.Marshal(update.Manifest{Schema: 1, Product: update.Product, Version: version,
+		Published: time.Now().UTC(), Files: []update.File{{Name: "a.tar.gz", SHA256: strings.Repeat("0", 64), Size: 7}}})
+	sig, _ := json.Marshal(update.Signature{KeyID: update.KeyID(pub),
+		Sig: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, update.SignedMessage(manifest)))})
 	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/o/r/releases":
 			json.NewEncoder(w).Encode([]map[string]any{{"tag_name": "v" + version, "html_url": "https://example/v" + version,
@@ -41,6 +41,7 @@ func fakeReleases(t *testing.T, version string) ([]update.PublicKey, *httptest.S
 			http.NotFound(w, r)
 		}
 	}))
+	srv.Start()
 	t.Cleanup(srv.Close)
 	return keys, srv
 }
