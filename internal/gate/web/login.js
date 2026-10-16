@@ -42,9 +42,33 @@
     return window.LanternfishGate.signIn().then(function () { location.replace(nextPath()); });
   }
 
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var ticket = document.getElementById("ticket").value.trim();
+    var name = document.getElementById("name").value.trim();
+    if (!ticket) return;
+    button.disabled = true;
+    status.textContent = "Creating this browser's key and enrolling…";
+    window.LanternfishGate.enroll(ticket, name).then(signIn).catch(function (err) {
+      status.textContent = "Enrollment failed: " + err.message;
+      button.disabled = false;
+    });
+  });
+
   if (!window.isSecureContext || !window.crypto || !crypto.subtle || !window.indexedDB) {
     status.textContent = "This browser can't hold a device key here. It needs HTTPS, WebCrypto and IndexedDB, " +
       "and private windows may not keep keys.";
+    return;
+  }
+
+  // A ticket from a scanned enrollment link: https://host/_lanternfish/#ticket=lft_…
+  // The fragment never reaches a server; drop it from the address bar too.
+  var linked = /(?:^#|&)ticket=([^&]+)/.exec(location.hash);
+  if (linked) {
+    history.replaceState(null, "", location.pathname + location.search);
+    try { document.getElementById("ticket").value = decodeURIComponent(linked[1]); } catch (e) { /* ignore */ }
+    showEnroll("Enrollment ticket received. Name this device and enroll it.");
+    document.getElementById("name").focus();
     return;
   }
 
@@ -66,18 +90,5 @@
     });
   }, function (err) {
     status.textContent = "Could not open key storage: " + err.message;
-  });
-
-  form.addEventListener("submit", function (e) {
-    e.preventDefault();
-    var ticket = document.getElementById("ticket").value.trim();
-    var name = document.getElementById("name").value.trim();
-    if (!ticket) return;
-    button.disabled = true;
-    status.textContent = "Creating this browser's key and enrolling…";
-    window.LanternfishGate.enroll(ticket, name).then(signIn).catch(function (err) {
-      status.textContent = "Enrollment failed: " + err.message;
-      button.disabled = false;
-    });
   });
 })();

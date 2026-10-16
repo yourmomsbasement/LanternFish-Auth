@@ -101,21 +101,22 @@ const (
 )
 
 type Gate struct {
-	cfg        Config
-	store      *Store
-	sealer     *Sealer
-	ca         *deviceCA
-	upstream   *ecdsa.PrivateKey
-	audit      *auditLog
-	alerts     *alerter
-	limiter    *failureLimiter
-	sessions   *sessionTable
-	challenges *challengeTable
-	streams    *streamTable
-	grants     *grantTable
-	policies   atomic.Pointer[policySet]
-	policyMu   sync.Mutex // serialises policy publishes with their reload
-	proxy      *httputil.ReverseProxy
+	cfg           Config
+	store         *Store
+	sealer        *Sealer
+	ca            *deviceCA
+	upstream      *ecdsa.PrivateKey
+	audit         *auditLog
+	alerts        *alerter
+	limiter       *failureLimiter
+	sessions      *sessionTable
+	challenges    *challengeTable
+	streams       *streamTable
+	grants        *grantTable
+	adminSessions *adminSessionTable
+	policies      atomic.Pointer[policySet]
+	policyMu      sync.Mutex // serialises policy publishes with their reload
+	proxy         *httputil.ReverseProxy
 
 	// lastAuth holds each device's latest sign-in time; it is saved to the
 	// data file only now and then (see noteAuth).
@@ -162,18 +163,19 @@ func New(cfg Config) (*Gate, error) {
 		return nil, err
 	}
 	g := &Gate{
-		cfg:        cfg,
-		store:      store,
-		sealer:     sealer,
-		ca:         ca,
-		upstream:   upstreamKey,
-		audit:      audit,
-		alerts:     &alerter{url: cfg.AlertWebhook, client: &http.Client{Timeout: 10 * time.Second}},
-		limiter:    newFailureLimiter(cfg.FailureLimit, cfg.FailureWindow, 10000),
-		sessions:   newSessionTable(maxSessionsPerDevice),
-		challenges: newChallengeTable(10000, 32),
-		streams:    newStreamTable(),
-		grants:     newGrantTable(),
+		cfg:           cfg,
+		store:         store,
+		sealer:        sealer,
+		ca:            ca,
+		upstream:      upstreamKey,
+		audit:         audit,
+		alerts:        &alerter{url: cfg.AlertWebhook, client: &http.Client{Timeout: 10 * time.Second}},
+		limiter:       newFailureLimiter(cfg.FailureLimit, cfg.FailureWindow, 10000),
+		sessions:      newSessionTable(maxSessionsPerDevice),
+		challenges:    newChallengeTable(10000, 32),
+		streams:       newStreamTable(),
+		grants:        newGrantTable(),
+		adminSessions: newAdminSessionTable(),
 	}
 	if err := store.Migrate(cfg.Now(), cfg.SessionTTL); err != nil {
 		return nil, fmt.Errorf("upgrade data file: %w", err)
@@ -245,6 +247,7 @@ func (g *Gate) routes() http.Handler {
 	mux.HandleFunc("GET /_lanternfish/admin/v1/devices", g.admin(g.handleListDevices))
 	mux.HandleFunc("POST /_lanternfish/admin/v1/devices/{id}/revoke", g.admin(g.handleRevokeDevice))
 	g.adminV2Routes(mux)
+	g.adminUIRoutes(mux)
 
 	mux.HandleFunc("GET /_lanternfish/{$}", g.serveStatic("index.html"))
 	mux.HandleFunc("GET /_lanternfish/gate-client.js", g.serveStatic("gate-client.js"))

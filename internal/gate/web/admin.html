@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lanternfish Gate admin</title>
+<link rel="stylesheet" href="/_lanternfish/admin/admin.css">
+</head>
+<body>
+<header>
+  <strong>Lanternfish Gate</strong>
+  <nav id="nav" hidden>
+    <button data-tab="devices">Devices</button>
+    <button data-tab="tickets">Tickets</button>
+    <button data-tab="policy">Policy</button>
+    <button data-tab="profiles">Profiles</button>
+    <button data-tab="owners">Owners</button>
+    <button data-tab="audit">Audit log</button>
+  </nav>
+  <span id="who"></span>
+  <button id="signout" class="link" hidden>Sign out</button>
+</header>
+<p id="flash" role="status" hidden></p>
+<main id="app">
+  <form id="signin" class="card narrow" hidden>
+    <h1>Admin sign-in</h1>
+    <p class="muted">Paste an admin key (<code>lfa_…</code>). It is exchanged for a session that ends after 15 minutes idle; the key isn't kept in this browser.</p>
+    <label for="key">Admin key</label>
+    <input id="key" type="password" autocomplete="off" spellcheck="false" required>
+    <button type="submit">Sign in</button>
+  </form>
+  <section id="view"></section>
+</main>
+<script src="/_lanternfish/admin/admin.js"></script>
+</body>
+</html>

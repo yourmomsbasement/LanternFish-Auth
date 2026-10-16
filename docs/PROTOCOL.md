@@ -91,6 +91,11 @@ ticket. Nothing else.
 
 ### 2. Enrollment (device → Gate, first launch)
 
+A browser can be sent a link `https://host/_lanternfish/#ticket=lft_…` (the
+dashboard shows it as a QR code). The ticket is in the fragment, which
+browsers never send to a server; the sign-in page reads it, removes it from
+the address bar and offers to enroll.
+
 **ECDSA devices** generate a P-256 key pair in their best available secure
 storage. They then sign the enroll message with the new key:
 
@@ -397,6 +402,16 @@ admin password.
 Tickets also take `subject_id` (the owner; default `sub_default`) and
 `profile_id` (the device's policy profile; default: the global policy).
 
+The admin dashboard at `/_lanternfish/admin/` uses the same API. `POST
+/_lanternfish/admin/session` with `{"key": "lfa_…"}` (JSON content type,
+same-origin) sets a `__Secure-lf_admin` cookie (HttpOnly, SameSite=Strict,
+path `/_lanternfish/admin`, bound to the client address, 15 minutes idle,
+8 hours at most) and returns a `csrf` token. Requests authenticated by that
+cookie are refused if the browser marks them cross-site, and changes
+(anything but `GET`) must carry the token in `X-Lanternfish-CSRF`. Revoking
+the admin key ends its dashboard sessions. `GET /_lanternfish/admin/session`
+returns the current session; `POST /_lanternfish/admin/logout` ends it.
+
 Admin API v2 (same guard):
 
 | Method & path | Purpose |
@@ -413,6 +428,8 @@ Admin API v2 (same guard):
 | `GET /_lanternfish/admin/v2/devices/{id}` | Device detail: owner, profile, policy version, approved networks, live sessions |
 | `PUT /_lanternfish/admin/v2/devices/{id}/profile` | `{profile_id}` (`""` for global) |
 | `DELETE /_lanternfish/admin/v2/devices/{id}/networks/{nid}` | Withdraw a network approval; its sessions and streams end |
+| `GET /_lanternfish/admin/v2/audit?q=&limit=` | Recent audit entries, newest first (`q` filters by text) |
+| `POST /_lanternfish/admin/v2/qr` | `{text}` → QR code modules, for showing an enrollment link |
 
 ## Abuse controls
 

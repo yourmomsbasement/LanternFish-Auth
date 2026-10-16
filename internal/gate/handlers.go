@@ -369,9 +369,23 @@ func (g *Gate) admin(h adminHandler) http.HandlerFunc {
 		if !g.guard(w, r) {
 			return
 		}
+		w.Header().Set("Cache-Control", "no-store")
 		auth := r.Header.Get("Authorization")
 		token, ok := strings.CutPrefix(auth, "Bearer ")
 		var key *AdminKey
+		if auth == "" {
+			// The dashboard: a session cookie plus, for changes, the CSRF header.
+			var why string
+			if key, why = g.adminFromCookie(r); key == nil {
+				// No credential at all guesses nothing, so it doesn't count
+				// toward the failure limit (the dashboard asks on every load).
+				if why == "" {
+					why = "admin key required"
+				}
+				writeError(w, http.StatusUnauthorized, why)
+				return
+			}
+		}
 		if ok && token != "" {
 			g.store.View(func(d *storeData) {
 				if k := d.adminKeyByHash(hashToken(token)); k != nil {
