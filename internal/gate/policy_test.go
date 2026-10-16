@@ -511,20 +511,20 @@ func TestStreamDeadlinesOnlyTighten(t *testing.T) {
 	now := time.Now()
 
 	// A deadline in the past closes the stream at once.
-	ctx, done := st.track(context.Background(), "dev", "1.2.3.4", "1.2.3.4/32", now.Add(-time.Second), now)
+	ctx, done := st.track(context.Background(), "dev", streamAuth{ip: "1.2.3.4", network: "1.2.3.4/32", deadline: now.Add(-time.Second)}, now)
 	if ctx.Err() == nil {
 		t.Fatal("stream with a past deadline is open")
 	}
 	done()
 
-	ctx, done = st.track(context.Background(), "dev", "1.2.3.4", "1.2.3.4/32", now.Add(time.Hour), now)
+	ctx, done = st.track(context.Background(), "dev", streamAuth{ip: "1.2.3.4", network: "1.2.3.4/32", deadline: now.Add(time.Hour)}, now)
 	defer done()
 	// A later deadline doesn't extend it; an earlier one re-arms it.
-	st.recheck("dev", now, func(string) (bool, time.Time) { return true, now.Add(2 * time.Hour) })
+	st.recheck("dev", now, func(streamAuth) streamVerdict { return streamVerdict{allowed: true, deadline: now.Add(2 * time.Hour)} })
 	if len(ft.fired) != 1 {
 		t.Fatalf("re-armed for a later deadline: %d timers", len(ft.fired))
 	}
-	st.recheck("dev", now, func(string) (bool, time.Time) { return true, now.Add(time.Minute) })
+	st.recheck("dev", now, func(streamAuth) streamVerdict { return streamVerdict{allowed: true, deadline: now.Add(time.Minute)} })
 	if len(ft.fired) != 2 {
 		t.Fatalf("not re-armed for an earlier deadline: %d timers", len(ft.fired))
 	}
@@ -534,9 +534,9 @@ func TestStreamDeadlinesOnlyTighten(t *testing.T) {
 	}
 
 	// A stream the policy no longer allows is closed.
-	ctx2, done2 := st.track(context.Background(), "dev", "1.2.3.4", "", time.Time{}, now)
+	ctx2, done2 := st.track(context.Background(), "dev", streamAuth{ip: "1.2.3.4", network: "", deadline: time.Time{}}, now)
 	defer done2()
-	st.recheck("dev", now, func(string) (bool, time.Time) { return false, time.Time{} })
+	st.recheck("dev", now, func(streamAuth) streamVerdict { return streamVerdict{} })
 	if ctx2.Err() == nil {
 		t.Fatal("disallowed stream left open")
 	}
@@ -562,7 +562,7 @@ func TestPublishClosesStreamsThePolicyBlocks(t *testing.T) {
 	h := newHarness(t)
 	key, enr := h.enrollECDSA("web")
 	h.signIn(enr.DeviceID, func(m []byte) []byte { return rawSign(key, m) })
-	ctx, done := h.g.streams.track(context.Background(), enr.DeviceID, "192.168.1.50", "", time.Time{}, h.now)
+	ctx, done := h.g.streams.track(context.Background(), enr.DeviceID, streamAuth{ip: "192.168.1.50", network: "", deadline: time.Time{}}, h.now)
 	defer done()
 	p := LegacyPolicy(15 * time.Minute)
 	p.Schedule = closedSchedule(h.now)

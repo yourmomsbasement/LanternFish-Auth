@@ -28,6 +28,15 @@ jobs:
         run: GOOS=windows go vet ./...
       - name: go test
         run: go test -race -count=1 ./...
+      - name: Toolchain pinned consistently
+        run: |
+          want=$(sed -n 's/^go //p' go.mod)
+          got=$(go env GOVERSION)
+          [ "$got" = "go$want" ] || { echo "go.mod pins go$want but CI built with $got"; exit 1; }
+          grep -q "^FROM golang:$want-alpine" Dockerfile ||
+            { echo "Dockerfile does not build with go$want (go.mod)"; exit 1; }
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   plugin:
     name: Jellyfin plugin (.NET)

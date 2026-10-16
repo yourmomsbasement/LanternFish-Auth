@@ -130,6 +130,11 @@ type Gate struct {
 	// could not be saved yet. They are treated as revoked.
 	unsavedRevocations sync.Map // device ID -> struct{}
 
+	// accessEpoch counts changes that take access away (revocation, owner
+	// disable, policy publish, profile change, network approval change).
+	// See accessChanged and serveProxy.
+	accessEpoch atomic.Uint64
+
 	handler http.Handler
 }
 
@@ -295,11 +300,51 @@ func (g *Gate) activeDevice(id string) *Device {
 	return out
 }
 
+// accessChanged records that access was just taken away. Callers must, in
+// this order: save the change; drop cached credentials it affects (sessions,
+// client-certificate grants); call accessChanged; then close streams. A
+// request that reads the epoch after this call then finds no stale
+// credential to authorize with, and one that read it before is either
+// registered in time to be closed or sees the epoch move (authorizeAndTrack).
+func (g *Gate) accessChanged() { g.accessEpoch.Add(1) }
+
+// authorizeAndTrack authorizes a proxied request and registers it as a
+// stream, so that changes to access can close it.
+//
+// SECURITY: authorization is checked once per request, so a WebSocket or a
+// long stream would outlive a revocation or a policy change unless it is
+// registered where those changes look. A change that lands after the request
+// was authorized but before it was registered would miss it: the change
+// closes the streams it finds, and this one isn't there yet. So the access
+// epoch is read before authorizing and again after registering. If it moved,
+// the change may have missed this request, and it is authorized again under
+// the new state. Either the change sees the registered stream, or this
+// request sees the change. On failure it writes the response and returns nil.
+func (g *Gate) authorizeAndTrack(w http.ResponseWriter, r *http.Request) (*requestAuth, context.Context, func()) {
+	for attempt := 0; attempt < 3; attempt++ {
+		epoch := g.accessEpoch.Load()
+		auth := g.authorizeRequest(w, r)
+		if auth == nil {
+			return nil, nil, nil
+		}
+		ctx, done := g.streams.track(r.Context(), auth.dev.ID, streamAuth{ip: clientIP(r), network: auth.network,
+			issued: auth.issued, expires: auth.expires, deadline: auth.streamDeadline()}, g.cfg.Now())
+		if g.accessEpoch.Load() == epoch {
+			return auth, ctx, done
+		}
+		done()
+	}
+	// Access is changing faster than this request can be checked.
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "temporarily_unavailable", "reason": "access_changing"})
+	return nil, nil, nil
+}
+
 func (g *Gate) serveProxy(w http.ResponseWriter, r *http.Request) {
-	auth := g.authorizeRequest(w, r)
+	auth, ctx, done := g.authorizeAndTrack(w, r)
 	if auth == nil {
 		return
 	}
+	defer done()
 	dev, how := auth.dev, auth.how
 
 	// Gate credentials stay at the Gate; Jellyfin only learns who it is.
@@ -313,15 +358,6 @@ func (g *Gate) serveProxy(w http.ResponseWriter, r *http.Request) {
 				r.AddCookie(c)
 			}
 		}
-	}
-	// SECURITY: authorization is checked once per request, so a WebSocket or
-	// a long stream would outlive a revocation or a policy change. Tie the
-	// request to the device (and its network and deadline) so those close it.
-	ctx, done := g.streams.track(r.Context(), dev.ID, clientIP(r), auth.network, auth.streamDeadline(), g.cfg.Now())
-	defer done()
-	if g.activeDevice(dev.ID) == nil { // revoked between authorizing and tracking
-		writeError(w, http.StatusUnauthorized, "lanternfish_auth_required")
-		return
 	}
 	ctx = context.WithValue(ctx, proxyAuthKey{}, proxyAuth{deviceID: dev.ID, how: how})
 	g.proxy.ServeHTTP(w, r.WithContext(ctx))
