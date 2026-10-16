@@ -574,6 +574,9 @@ func (g *Gate) handleRevokeDevice(w http.ResponseWriter, r *http.Request, key *A
 	// locked out (sessions dropped, streams closed) even if the save fails,
 	// rather than leaving it working until someone notices the error.
 	g.unsavedRevocations.Store(id, struct{}{})
+	// Every way in (sessions, grants, certificates) checks activeDevice,
+	// which already refuses this device, so nothing cached can authorize it.
+	g.accessChanged()
 	err := g.store.Update(func(d *storeData) error {
 		dev, ok := d.Devices[id]
 		if !ok {

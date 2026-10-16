@@ -38,6 +38,29 @@ flood could use it up and lock every device out, which would make it a
 lockout tool rather than a defence. Many separate sources stay out of scope,
 as SECURITY.md says.
 
+## v0.2.0 review: policies, streams and the release toolchain
+
+A review of v0.2.0 found one release-toolchain issue and six problems with
+how policy changes reach live sessions and open connections. None was an
+unauthenticated bypass. All are fixed, each with a regression test (tests
+R2–R6 were checked to fail with their fix taken out).
+
+| # | Priority | Issue | Fix |
+|---|---|---|---|
+| R1 | High | Release binaries were built with Go 1.24.13, an unsupported Go release with known TLS 1.3 and HTTP/2 denial-of-service bugs (GO-2026-4870, GO-2026-6617). | `go.mod` pins Go 1.27.2, and the Dockerfile follows it (CI checks they match). The release fails unless each binary reports that compiler, and runs govulncheck on every binary; CI runs it on the source. |
+| R2 | Medium | A change that took access away (owner disabled, revocation, network removed, policy restricted) could miss a request authorized just before it but registered as a stream just after, letting that request through. | An access epoch: changes bump it after saving and before closing streams; a request reads it before authorizing and after registering, and is authorized again if it moved. |
+| R3 | Medium | When a new policy shortened the session lifetime, a session already expired under it got one more request through. | The session is removed and the request refused as soon as the recomputed expiry has passed. Re-authorizing a session that was removed concurrently also fails. |
+| R4 | Medium | Switching to strict expiry, or shortening a strict lifetime, didn't put a deadline on connections already open. | Streams record their credential's issue time and end; a recheck sets the strict deadline from them under the current lifetime. |
+| R5 | Medium | A stream opened while IP binding was off kept no network, so after binding was turned back on, removing that network's approval didn't close it. | Rechecks store each stream's current network. Removing an approval also re-judges the device's streams under the policy. |
+| R6 | Medium | A date cutoff or blackout more than eight days away gave continuity-mode connections no deadline. | Exact cutoffs and blackouts are found however far away. For a weekly schedule with no change in the horizon (only possible around a clock change), the horizon itself becomes the deadline. |
+| R7 | Low | Each schedule boundary lookup scanned up to 11,520 minutes, checking every blackout each time, while holding the stream lock. | Blackouts are merged so each check is a binary search. 24/7 schedules skip the minute scan. Results are cached per policy, and streams are evaluated outside the lock. Benchmark: 16.4 ms → 139 ns with 256 blackouts. |
+
+The review also noted design boundaries, which are unchanged:
+continuity mode lets an open connection outlive its token by design; a new
+network is approved by device-key proof (not TOTP or WebAuthn, which aren't
+implemented and are rejected in policies); IP binding uses the TCP peer
+address; and the dashboard shares an origin with Jellyfin.
+
 ## Reviewed, no change needed
 
 * **Credential handling:** tickets, admin keys and session tokens are 256-bit

@@ -276,6 +276,14 @@ renew before it ends. `stream_expiry_mode`:
 Either way, revocation, a disabled owner, a schedule closing, or a published
 policy that blocks the device closes them at once.
 
+Open connections are re-judged under the policy that is current, not the one
+they opened under. Switching to `strict`, or shortening `ttl_seconds`, gives
+them a deadline of their session's issue time plus the new lifetime, and
+closes them straight away if that has passed. Turning IP binding on binds
+them to their network, so withdrawing that network's approval closes them.
+A session that a shorter `ttl_seconds` has already expired is refused on its
+next request.
+
 **IP binding.** When enabled, sessions are bound to the network they were
 issued on: the client address (`exact`), or the IPv4/IPv6 prefix around it
 (`prefix`; /32 and /64 recommended, as IPv6 addresses rotate within a /64).
