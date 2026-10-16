@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+	// The release image has no zoneinfo; schedules need IANA time zones.
+	_ "time/tzdata"
 
 	"github.com/yourmomsbasement/lanternfish-auth/internal/gate"
 )
@@ -48,7 +50,7 @@ Environment:
   LANTERNFISH_MASTER_KEY_DPAPI_FILE  DPAPI-protected master key (Windows)
   LANTERNFISH_MASTER_KEY         base64 master key
   LANTERNFISH_ALERT_WEBHOOK      webhook for enrollment/revocation alerts (Discord-compatible)
-  LANTERNFISH_SESSION_TTL        session lifetime (default 15m)
+  LANTERNFISH_SESSION_TTL        session lifetime for the initial policy (default 15m)
   LANTERNFISH_INJECT_RENEWAL     set to false to stop adding the session-renewal script to
                                  Jellyfin's web client when the Jellyfin plugin hasn't (default true)
   LANTERNFISH_ADMIN_ALLOW        networks the admin API answers from, comma-separated CIDRs

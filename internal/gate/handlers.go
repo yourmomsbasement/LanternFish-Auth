@@ -141,6 +141,17 @@ func (g *Gate) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		Kind:         kind,
 		CreatedAt:    now,
 		EnrolledFrom: clientIP(r),
+		SubjectID:    ticket.SubjectID,
+		ProfileID:    ticket.ProfileID,
+	}
+	if dev.SubjectID == "" {
+		dev.SubjectID = defaultSubjectID
+	}
+	// The ticket was delivered to this network by the administrator, so
+	// enrolling approves it (when the device's policy binds to networks).
+	if pol := g.policyFor(dev); pol.Policy.IP.Enabled {
+		dev.Networks = []NetworkApproval{{ID: newID("net_"), Network: networkKey(dev.EnrolledFrom, pol.Policy.IP),
+			Method: "enrollment", ApprovedAt: now, ExpiresAt: now.Add(pol.approvalTTL()), PolicyVersion: pol.Version}}
 	}
 	if dev.Name == "" {
 		dev.Name = cleanName(req.Name)
@@ -197,6 +208,9 @@ func (g *Gate) handleEnroll(w http.ResponseWriter, r *http.Request) {
 					return errDup
 				}
 			}
+		}
+		if dev.ProfileID != "" && d.Profiles[dev.ProfileID] == nil {
+			dev.ProfileID = "" // profile deleted since the ticket was made: global policy
 		}
 		delete(d.Tickets, ticket.ID)
 		d.Devices[dev.ID] = dev
@@ -270,19 +284,51 @@ func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, exp := g.sessions.create(dev.ID, now, g.cfg.SessionTTL)
+	// The signed challenge is a fresh proof of the device key; the policy
+	// decides whether that's enough here and now.
+	d := g.authorizeKeyProof(dev, clientIP(r), now)
+	if d.outcome != outAllow {
+		g.denySession(w, r, dev, d, now)
+		return
+	}
+	exp := earliest(now.Add(d.pol.sessionTTL()), d.expires)
+	token := g.sessions.create(session{deviceID: dev.ID, expires: exp, network: d.network,
+		version: d.pol.Version, hardEnd: d.hardEnd}, now, d.pol.Policy.Session.MaxPerDevice)
 	g.noteAuth(dev, now)
+	maxAge := int(exp.Sub(now).Seconds())
+	if maxAge < 1 {
+		maxAge = 1
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
 		Path:     "/",
 		Expires:  exp,
-		MaxAge:   int(g.cfg.SessionTTL.Seconds()),
+		MaxAge:   maxAge,
 		Secure:   true,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"session_token": token, "expires_at": exp.UTC()})
+}
+
+// denySession answers a correctly signed sign-in the policy doesn't allow.
+// It isn't a credential failure, so it doesn't count toward the IP's
+// failure limit; the device is proven, so it gets the reason.
+func (g *Gate) denySession(w http.ResponseWriter, r *http.Request, dev *Device, d decision, now time.Time) {
+	fields := map[string]any{"device_id": dev.ID, "ip": clientIP(r), "reason": d.reason, "network": d.network}
+	if d.pol != nil {
+		fields["policy_version"] = d.pol.Version
+	}
+	g.audit.write(now, "session_denied", fields)
+	switch d.outcome {
+	case outUnavailable:
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "temporarily_unavailable", "reason": d.reason})
+	case outReenroll:
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "signature not accepted", "reason": d.reason})
+	default:
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access_denied", "reason": d.reason})
+	}
 }
 
 func (g *Gate) verifyDevice(dev *Device, msg, sig []byte) bool {
@@ -347,6 +393,8 @@ func (g *Gate) handleCreateTicket(w http.ResponseWriter, r *http.Request, key *A
 		Platform   string `json:"platform"`
 		Label      string `json:"label"`
 		TTLSeconds int    `json:"ttl_seconds"`
+		SubjectID  string `json:"subject_id"`
+		ProfileID  string `json:"profile_id"`
 	}
 	if err := g.readJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "malformed request")
@@ -376,21 +424,41 @@ func (g *Gate) handleCreateTicket(w http.ResponseWriter, r *http.Request, key *A
 		CreatedBy: key.Name,
 		CreatedAt: now,
 		ExpiresAt: now.Add(ttl),
+		SubjectID: req.SubjectID,
+		ProfileID: req.ProfileID,
 	}
+	if t.SubjectID == "" {
+		t.SubjectID = defaultSubjectID
+	}
+	errSubject := errors.New("no such subject")
+	errProfile := errors.New("no such profile")
 	if err := g.store.Update(func(d *storeData) error {
+		if s := d.Subjects[t.SubjectID]; s == nil || s.Status != "active" {
+			return errSubject
+		}
+		if t.ProfileID != "" && d.Profiles[t.ProfileID] == nil {
+			return errProfile
+		}
 		d.pruneTickets(now)
 		d.Tickets[t.ID] = t
 		return nil
-	}); err != nil {
+	}); errors.Is(err, errSubject) {
+		writeError(w, http.StatusBadRequest, "subject_id is not an active subject")
+		return
+	} else if errors.Is(err, errProfile) {
+		writeError(w, http.StatusBadRequest, "profile_id is not a profile")
+		return
+	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not save ticket")
 		return
 	}
 	g.audit.write(now, "ticket_created", map[string]any{
 		"ticket_id": t.ID, "platform": t.Platform, "label": t.Label, "admin_key": key.Name, "ip": clientIP(r),
-		"expires_at": t.ExpiresAt.UTC(),
+		"expires_at": t.ExpiresAt.UTC(), "subject_id": t.SubjectID, "profile_id": t.ProfileID,
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": t.ID, "ticket": value, "platform": t.Platform, "label": t.Label, "expires_at": t.ExpiresAt.UTC(),
+		"subject_id": t.SubjectID, "profile_id": t.ProfileID,
 	})
 }
 
@@ -403,6 +471,7 @@ func (g *Gate) handleListTickets(w http.ResponseWriter, r *http.Request, _ *Admi
 				out = append(out, map[string]any{
 					"id": t.ID, "platform": t.Platform, "label": t.Label, "created_by": t.CreatedBy,
 					"created_at": t.CreatedAt.UTC(), "expires_at": t.ExpiresAt.UTC(),
+					"subject_id": t.SubjectID, "profile_id": t.ProfileID,
 				})
 			}
 		}
@@ -444,24 +513,42 @@ type deviceView struct {
 	// RevocationUnsaved: revoked and locked out now, but the revocation
 	// could not be saved and would be lost on restart. Revoke again.
 	RevocationUnsaved bool `json:"revocation_unsaved,omitempty"`
+
+	SubjectID     string            `json:"subject_id"`
+	ProfileID     string            `json:"profile_id"`
+	PolicyVersion int               `json:"policy_version"`
+	Networks      []NetworkApproval `json:"networks"`
+	LiveSessions  int               `json:"live_sessions"`
 }
 
 func (g *Gate) handleListDevices(w http.ResponseWriter, r *http.Request, _ *AdminKey) {
 	out := []deviceView{}
+	now := g.cfg.Now()
 	g.store.View(func(d *storeData) {
 		for _, dev := range d.Devices {
-			v := deviceView{dev.ID, dev.Name, dev.Platform, dev.Kind, dev.CreatedAt,
-				dev.EnrolledFrom, dev.LastAuthAt, dev.RevokedAt, false}
-			if t, ok := g.lastAuth.Load(dev.ID); ok && (v.LastAuthAt == nil || t.(time.Time).After(*v.LastAuthAt)) {
-				lt := t.(time.Time)
-				v.LastAuthAt = &lt
-			}
-			_, v.RevocationUnsaved = g.unsavedRevocations.Load(dev.ID)
-			out = append(out, v)
+			out = append(out, g.viewDevice(dev, now))
 		}
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	writeJSON(w, http.StatusOK, map[string]any{"devices": out})
+}
+
+func (g *Gate) viewDevice(dev *Device, now time.Time) deviceView {
+	v := deviceView{ID: dev.ID, Name: dev.Name, Platform: dev.Platform, Kind: dev.Kind, CreatedAt: dev.CreatedAt,
+		EnrolledFrom: dev.EnrolledFrom, LastAuthAt: dev.LastAuthAt, RevokedAt: dev.RevokedAt,
+		SubjectID: dev.SubjectID, ProfileID: dev.ProfileID, PolicyVersion: g.policyFor(dev).Version,
+		Networks: []NetworkApproval{}, LiveSessions: g.sessions.count(dev.ID, now)}
+	for _, a := range dev.Networks {
+		if now.Before(a.ExpiresAt) {
+			v.Networks = append(v.Networks, a)
+		}
+	}
+	if t, ok := g.lastAuth.Load(dev.ID); ok && (v.LastAuthAt == nil || t.(time.Time).After(*v.LastAuthAt)) {
+		lt := t.(time.Time)
+		v.LastAuthAt = &lt
+	}
+	_, v.RevocationUnsaved = g.unsavedRevocations.Load(dev.ID)
+	return v
 }
 
 func (g *Gate) handleRevokeDevice(w http.ResponseWriter, r *http.Request, key *AdminKey) {
@@ -490,6 +577,7 @@ func (g *Gate) handleRevokeDevice(w http.ResponseWriter, r *http.Request, key *A
 		return
 	}
 	g.sessions.removeDevice(id)
+	g.grants.removeDevice(id)
 	g.streams.cancelDevice(id)
 	if err != nil {
 		log.Printf("revoke %s: could not save: %v", id, err)

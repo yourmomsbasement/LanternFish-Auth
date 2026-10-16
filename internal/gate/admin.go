@@ -3,6 +3,7 @@ package gate
 import (
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"sort"
 )
 
@@ -22,6 +23,9 @@ func OpenAdmin(cfg Config) (*Admin, error) {
 	store, err := OpenStore(cfg.DataPath, sealer, cfg.Now())
 	if err != nil {
 		return nil, err
+	}
+	if err := store.Migrate(cfg.Now(), cfg.SessionTTL); err != nil {
+		return nil, fmt.Errorf("upgrade data file: %w", err)
 	}
 	audit, err := openAuditLog(cfg.AuditPath)
 	if err != nil {

@@ -151,7 +151,7 @@ func TestUnsavedRevocationFailsClosed(t *testing.T) {
 	h := newHarness(t)
 	key, enr := h.enrollECDSA("web")
 	token := h.signIn(enr.DeviceID, func(m []byte) []byte { return rawSign(key, m) })
-	ctx, done := h.g.streams.track(context.Background(), enr.DeviceID)
+	ctx, done := h.g.streams.track(context.Background(), enr.DeviceID, "", "", time.Time{}, h.now)
 	defer done()
 
 	restore := breakSaves(t, h.g.store)

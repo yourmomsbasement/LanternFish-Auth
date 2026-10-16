@@ -131,7 +131,8 @@ POST /_lanternfish/v1/challenge
 
 POST /_lanternfish/v1/session
 {"device_id": "dev_…", "challenge": "<as received>", "signature": "<b64>"}
-200 {"session_token": "lfs_…", "expires_at": "…"}                // valid 15 min
+200 {"session_token": "lfs_…", "expires_at": "…"}                // lifetime set by the access policy
+403 {"error": "access_denied", "reason": "outside_schedule"}       // signature fine, policy says no
 Set-Cookie: lf_session=lfs_…; Path=/; Secure; HttpOnly; SameSite=Lax
 ```
 
@@ -147,6 +148,11 @@ Set-Cookie: lf_session=lfs_…; Path=/; Secure; HttpOnly; SameSite=Lax
   oldest, so a client that renews too often only invalidates its own old
   tokens.
 * `POST /_lanternfish/v1/logout` ends the current session.
+* The signed challenge is a fresh proof of the device key, and the device's
+  access policy is applied to it (see *Access policy*). A correct signature
+  the policy refuses gets `403 access_denied` with a `reason`, and doesn't
+  count against the address's failure limit. `503 temporarily_unavailable`
+  means the Gate couldn't record a network approval; try again.
 
 ### 4. Proxied requests
 
@@ -164,17 +170,34 @@ the authenticated device ID, and any incoming `X-Lanternfish-Auth` with how
 the request authenticated: `certificate`, `cookie` (a browser) or `header`
 (an app sending `X-Lanternfish-Session`).
 
-Authentication is checked on every request. Revoking a device also closes the
-requests it still has open, such as WebSockets and media streams.
+Authentication and the access policy are checked on every request. A client
+certificate on its own no longer authorizes anything: the policy is applied
+to it as to a session, and the result is remembered for at most one session
+lifetime (and dropped whenever a policy is published). A request that
+presents one device's certificate and another device's session token gets
+`403 credential_mismatch`.
+
+Revoking a device, disabling its owner, withdrawing a network approval, a
+schedule closing, or publishing a policy that blocks the device also closes
+the requests it still has open, such as WebSockets and media streams. Whether
+an open stream outlives the session that started it is the policy's
+`stream_expiry_mode`.
 
 The Gate then **signs** the forwarded request (see *Signed requests to
 Jellyfin* below), so Jellyfin can refuse anything that did not come through
 the Gate.
 
-Unauthenticated requests receive `401 {"error": "lanternfish_auth_required"}`.
-The exception is a browser page navigation (a `GET` whose `Accept` includes
-`text/html`). That is redirected to the Gate's sign-in page at
-`/_lanternfish/?next=<path>`.
+Unauthenticated requests receive `401 {"error": "lanternfish_auth_required"}`,
+with a `reason` when there is one (`network_changed`: the session is bound to
+another network; sign in again from this one). Requests the policy refuses
+receive `403 {"error": "access_denied", "reason": "…"}`. The exception is a
+browser page navigation (a `GET` whose `Accept` includes `text/html`). That
+is redirected to the Gate's sign-in page at
+`/_lanternfish/?next=<path>[&reason=…]`, which signs in again and shows the
+reason if access is still refused.
+
+Reasons: `outside_schedule`, `owner_disabled`, `network_changed`,
+`credential_mismatch`, `device_revoked`, `could_not_save_network_approval`.
 
 ### Session renewal in the web client
 
@@ -216,6 +239,87 @@ If the revocation can't be saved (for example, the disk is full), the Gate
 answers `500` but still locks the device out and closes its connections
 until the Gate restarts. The device list shows `"revocation_unsaved": true`.
 Fix the problem and revoke again to make it permanent.
+
+## Access policy
+
+Every device is governed by one policy: its profile's, or the global policy.
+A policy is a typed document (schema version 2), validated as a whole before
+it can be published. Every publish creates a new immutable version, recorded
+with who published it and why.
+
+```json
+{
+  "schema_version": 2,
+  "session":  {"ttl_seconds": 300, "max_per_device": 16, "stream_expiry_mode": "continuity"},
+  "ip":       {"enabled": true, "match": "prefix", "ipv4_prefix_len": 32, "ipv6_prefix_len": 64,
+               "on_change": "key_proof", "approval_ttl_seconds": 86400, "remembered_networks": 1},
+  "schedule": {"enabled": true, "timezone": "America/Chicago",
+               "weekly_windows": [{"days": ["fri", "sat"], "start": "18:00", "end": "01:00"}],
+               "valid_from": null, "valid_until": null,
+               "blackout_intervals": [{"start": "2026-12-24T00:00:00Z", "end": "2026-12-26T00:00:00Z", "reason": "holiday"}]}
+}
+```
+
+**Session.** `ttl_seconds` (60–86400) is a session's hard lifetime; clients
+renew before it ends. `stream_expiry_mode`:
+
+* `continuity` (default): a connection that is already open, such as a
+  playing stream or a WebSocket, may outlive its session. The next new
+  request needs a valid session.
+* `strict`: open connections close when their session expires.
+
+Either way, revocation, a disabled owner, a schedule closing, or a published
+policy that blocks the device closes them at once.
+
+**IP binding.** When enabled, sessions are bound to the network they were
+issued on: the client address (`exact`), or the IPv4/IPv6 prefix around it
+(`prefix`; /32 and /64 recommended, as IPv6 addresses rotate within a /64).
+A session used from another network gets `401 network_changed`. A device may
+only sign in from networks it is approved for:
+
+* Enrolling approves the network the ticket was used from.
+* `on_change: "key_proof"`: a signed challenge (or client certificate) from a
+  new network approves it. This stops stolen session tokens, not a stolen
+  device key.
+* `on_change: "deny"`: only enrollment approves networks.
+* `additional_verification` (TOTP or WebAuthn) is reserved and rejected until
+  those exist.
+
+Approvals last `approval_ttl_seconds` (1 hour to 30 days). A device keeps at
+most `remembered_networks` (1–10). When a new approval pushes one out, the
+device's sessions and streams on that network end. The address is the TCP
+peer the Gate sees. `X-Forwarded-For` is never trusted. Behind a TCP-level
+proxy every client shares the proxy's address, so IP binding means nothing
+there.
+
+Changing `match` or the prefix lengths changes what networks are called, so
+existing approvals stop matching. Under `key_proof` devices re-approve on
+their next sign-in; under `deny` they need re-enrolling. The preview warns
+about this.
+
+**Schedule.** Access is allowed inside `weekly_windows`, in `timezone` (an
+IANA name; `Local` is refused). Times are `HH:MM`, half-open `[start, end)`.
+An end at or before the start runs past midnight; `24:00` is the end of the
+day. Times are judged by the wall clock in that zone:
+
+* A local time skipped when clocks go forward never happens, so it grants
+  nothing.
+* A local time repeated when they go back happens twice, and both count.
+
+`valid_from`/`valid_until` bound access to `[from, until)`, and
+`blackout_intervals` deny access inside them, overriding the windows. The
+Gate's clock decides, never the client's. A session never outlives the
+schedule window it was issued in.
+
+**Upgrading.** A data file from before policies gets a default owner
+(`sub_default`) for its devices and tickets, and a global policy equal to the
+old behaviour: sessions of `LANTERNFISH_SESSION_TTL`, no IP binding, no
+schedule. Nothing changes until you publish a policy. After that,
+`LANTERNFISH_SESSION_TTL` has no effect.
+
+**Policy changes** take effect immediately. Sessions issued under an older
+version are re-checked on their next request, and can only get shorter.
+Open streams are re-checked when the policy is published.
 
 ## Signed requests to Jellyfin
 
@@ -289,6 +393,26 @@ admin password.
 | `DELETE /_lanternfish/admin/v1/tickets/{id}` | Cancel a pending ticket |
 | `GET /_lanternfish/admin/v1/devices` | List devices |
 | `POST /_lanternfish/admin/v1/devices/{id}/revoke` | Revoke a device |
+
+Tickets also take `subject_id` (the owner; default `sub_default`) and
+`profile_id` (the device's policy profile; default: the global policy).
+
+Admin API v2 (same guard):
+
+| Method & path | Purpose |
+|---|---|
+| `GET /_lanternfish/admin/v2/policy` | Current global and profile policies |
+| `GET /_lanternfish/admin/v2/policy/recommended` | The recommended starting policy |
+| `GET /_lanternfish/admin/v2/policy/history?scope=` | Published versions, newest first |
+| `POST /_lanternfish/admin/v2/policy/preview` | `{scope, policy}` → validity, problems, upcoming schedule changes, devices affected |
+| `PUT /_lanternfish/admin/v2/policy` | `{scope, expected_version, reason, policy}`; `409` if `expected_version` isn't current, `422` with `problems` if invalid |
+| `GET`/`POST /_lanternfish/admin/v2/profiles` | List; create `{name, policy?}` (defaults to a copy of the global policy) |
+| `DELETE /_lanternfish/admin/v2/profiles/{id}` | Delete; its devices fall back to the global policy |
+| `GET`/`POST /_lanternfish/admin/v2/subjects` | List; create `{name, role}` |
+| `POST /_lanternfish/admin/v2/subjects/{id}/disable` / `enable` | Disabling ends its devices' sessions and streams |
+| `GET /_lanternfish/admin/v2/devices/{id}` | Device detail: owner, profile, policy version, approved networks, live sessions |
+| `PUT /_lanternfish/admin/v2/devices/{id}/profile` | `{profile_id}` (`""` for global) |
+| `DELETE /_lanternfish/admin/v2/devices/{id}/networks/{nid}` | Withdraw a network approval; its sessions and streams end |
 
 ## Abuse controls
 
