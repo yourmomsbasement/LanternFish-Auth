@@ -36,6 +36,8 @@
       else el.appendChild(typeof c === "string" || typeof c === "number" ? document.createTextNode(String(c)) : c);
     }
   }
+  // Links from outside data (GitHub's API) must be plain https.
+  function safeURL(u) { return /^https:\/\//.test(u || "") ? u : undefined; }
   function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
 
   function flash(msg, isError) {
@@ -647,6 +649,77 @@
     load();
     return Promise.resolve(h("div", { class: "card" }, h("div", { class: "row" }, h("h2", { text: "Audit log" }), q,
       h("button", { class: "secondary", text: "Refresh", onclick: load })), box));
+  };
+
+  // ---- updates ----
+
+  var pollTimer = null;
+  tabs.updates = function () {
+    clearTimeout(pollTimer);
+    return api("GET", V2 + "update").then(function (u) {
+      var out = [];
+      var head = h("div", { class: "card" }, h("h2", { text: "Updates" }),
+        h("p", null, "Running ", h("strong", { text: u.current }), "."));
+      out.push(head);
+      if (!u.supported) {
+        add(head, h("p", { class: "bad", text: "Updating from here isn't available: " + (u.reason || "unknown reason") }),
+          h("p", { class: "muted small", text: "See docs/RELEASES.md: install the updater (install-gate.sh from a release) and put your release signing public key in " + (u.keys_path || "/etc/lanternfish/release-keys") + "." }));
+      }
+      if (u.status) {
+        var s = u.status, cls = s.state === "succeeded" ? "ok" : (s.state === "installing" ? "" : "bad");
+        add(head, h("p", null, "Last update: ", h("strong", { class: cls, text: s.state.replace("_", " ") }),
+          " " + s.version + " (from " + s.from + ")" + (s.requested_by ? " by " + s.requested_by : "") + ", " + when(s.at) + ". ",
+          h("span", { class: "muted", text: s.message })));
+      }
+      if (u.pending || (u.status && u.status.state === "installing")) {
+        add(head, h("p", { text: "An update is in progress. The Gate restarts during it (about 30 seconds; playing streams drop), and you'll need to sign in again." }));
+        pollTimer = setTimeout(function () { if (location.hash === "#updates") reload(); }, 4000);
+      }
+      if (u.error) add(head, h("p", { class: "bad", text: "Couldn't check GitHub: " + u.error }));
+      if (u.latest) {
+        add(head, h("p", null, "Newest verified release: ", h("strong", { text: u.latest.version }),
+          ", signed by " + u.latest.signed_by + ", published " + when(u.latest.published_at) + ". ",
+          h("a", { href: safeURL(u.latest.url), target: "_blank", rel: "noopener noreferrer", text: "Release notes" })));
+        if (u.update_available && u.supported && !u.pending) {
+          add(head, h("button", { text: "Install " + u.latest.version, onclick: function (e) {
+            if (!confirm("Install " + u.latest.version + "? The Gate restarts (about 30 seconds); playing streams drop and everyone's browser renews its session. If the new version isn't healthy it is rolled back automatically.")) return;
+            e.target.disabled = true;
+            api("POST", V2 + "update", { version: u.latest.version }).then(function () {
+              flash("Update to " + u.latest.version + " requested.");
+              reload();
+            }, function (err) { e.target.disabled = false; fail(err); });
+          } }));
+        } else if (!u.update_available) {
+          add(head, h("p", { class: "ok", text: "Up to date." }));
+        }
+      } else if (u.supported && !u.error) {
+        add(head, h("p", { class: "muted", text: "No signed release found yet." }));
+      }
+      add(head, h("div", { class: "row" },
+        h("button", { class: "secondary", text: "Check now", onclick: function () {
+          api("GET", V2 + "update?refresh=1").then(reload, fail);
+        } }),
+        h("span", { class: "muted small", text: u.checked_at ? "Checked " + when(u.checked_at) + "." : "" })));
+      if (u.auto_update !== undefined) {
+        add(head, h("p", { class: "muted small", text: "Automatic updates: " + u.auto_update +
+          (u.auto_update === "off" ? "" : " (installed nightly)") + ". Set LANTERNFISH_AUTO_UPDATE in /etc/lanternfish/gate.env to off, patch, minor or all." }));
+      }
+      if (u.candidates && u.candidates.length) {
+        out.push(h("div", { class: "card" }, h("h2", { text: "Recent releases" }), h("table", null,
+          h("thead", null, h("tr", null, ["Release", "Published", "Signature"].map(function (t) { return h("th", { text: t }); }))),
+          h("tbody", null, u.candidates.map(function (c) {
+            return h("tr", null, h("td", null, h("a", { href: safeURL(c.url), target: "_blank", rel: "noopener noreferrer", text: c.tag }),
+              c.prerelease ? " (pre-release)" : ""), h("td", { text: when(c.published_at) }),
+              h("td", { class: c.verified ? "ok" : "bad", text: c.verified ? "verified, " + c.signed_by : c.problem }));
+          })))));
+      }
+      return out;
+    }, function (err) {
+      // The Gate restarting mid-update: keep trying.
+      if (err && err.message === "signed out") throw err;
+      pollTimer = setTimeout(function () { if (location.hash === "#updates") reload(); }, 4000);
+      return h("div", { class: "card" }, h("p", { text: "Waiting for the Gate… (" + err.message + ")" }));
+    });
   };
 
   // ---- start ----
