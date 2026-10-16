@@ -1,0 +1,23 @@
+[Unit]
+Description=Lanternfish Gate automatic update check (LANTERNFISH_AUTO_UPDATE)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/lanternfish/gate.env
+ExecStart=/usr/local/bin/lanternfish-gate update auto
+TimeoutStartSec=15min
+
+StateDirectory=lanternfish-update
+StateDirectoryMode=0755
+UMask=0022
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/usr/local/bin /usr/local/lib/lanternfish /var/lib/lanternfish
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

@@ -118,12 +118,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - name: Release manifest (signed offline afterwards; see docs/RELEASES.md)
+        run: |
+          bash scripts/release-manifest.sh "$GITHUB_REF_NAME" dist > lanternfish-release.json
+          mv lanternfish-release.json dist/
+          cat dist/lanternfish-release.json
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -143,6 +149,8 @@ jobs:
           | \`jellyfin-plugin-lanternfish-gate_${version}.zip\` | Jellyfin 12.2+ plugin: unzip into \`plugins/LanternfishGate_${version}/\` |
           | \`manifest.json\` | Jellyfin plugin repository manifest |
           | \`SHA256SUMS\` | Checksums (\`sha256sum -c SHA256SUMS\`) |
+          | \`lanternfish-release.json\` | Release manifest: every file's SHA-256, for the updater |
+          | \`lanternfish-release.json.sig\` | The manifest's signature, added by the maintainer after checking the files. Gates update only to signed releases. |
 
           Setup on Proxmox: \`deploy/proxmox/README.md\` inside the Gate archive.
 

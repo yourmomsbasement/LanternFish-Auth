@@ -39,9 +39,24 @@ if [ ! -f /etc/lanternfish/gate.env ]; then
 fi
 
 install -m 0644 "$HERE/lanternfish-gate.service" /etc/systemd/system/lanternfish-gate.service
+# The updater: installs signed releases asked for from the dashboard (and,
+# if LANTERNFISH_AUTO_UPDATE allows, daily). It trusts only the keys in
+# /etc/lanternfish/release-keys; without that file it installs nothing.
+for u in lanternfish-gate-update.service lanternfish-gate-update.path \
+         lanternfish-gate-update-auto.service lanternfish-gate-update-auto.timer; do
+  install -m 0644 "$HERE/$u" "/etc/systemd/system/$u"
+done
+install -d -m 0755 /var/lib/lanternfish-update
+if [ ! -f /etc/lanternfish/release-keys ]; then
+  printf '# Trusted Lanternfish release signing keys, one per line (lfrk1 ...).\n# See docs/RELEASES.md.\n' \
+    > /etc/lanternfish/release-keys
+fi
+chown root:root /etc/lanternfish/release-keys
+chmod 0644 /etc/lanternfish/release-keys
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   systemctl enable lanternfish-gate >/dev/null
+  systemctl enable --now lanternfish-gate-update.path lanternfish-gate-update-auto.timer >/dev/null
 fi
 
 cat <<'MSG'

@@ -430,6 +430,8 @@ Admin API v2 (same guard):
 | `DELETE /_lanternfish/admin/v2/devices/{id}/networks/{nid}` | Withdraw a network approval; its sessions and streams end |
 | `GET /_lanternfish/admin/v2/audit?q=&limit=` | Recent audit entries, newest first (`q` filters by text) |
 | `POST /_lanternfish/admin/v2/qr` | `{text}` → QR code modules, for showing an enrollment link |
+| `GET /_lanternfish/admin/v2/update?refresh=1` | Running version, newest verified release, recent releases and their signature status, the updater's last result |
+| `POST /_lanternfish/admin/v2/update` | `{version}`: ask the updater to install the newest verified release (`202`); see [RELEASES.md](RELEASES.md) |
 
 ## Abuse controls
 

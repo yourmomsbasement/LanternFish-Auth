@@ -132,6 +132,13 @@ jq '{expected_version: 1, reason: "recommended policy", policy: .policy}' rec.js
 Schedules, blackouts, per-device profiles and owners are described in
 [Access policy](docs/PROTOCOL.md#access-policy).
 
+### Updates
+
+Releases are signed with a key only you hold, and Gates install only signed
+releases: from the dashboard's Updates tab, or nightly if you turn that on.
+A failed update rolls itself back. Setup and the release routine are in
+[docs/RELEASES.md](docs/RELEASES.md).
+
 ## Hardening checklist
 
 * Jellyfin must not be reachable except through the Gate. Bind it to
@@ -164,7 +171,10 @@ Push a tag like `v0.2.0` (or `v0.2.0-rc1` for a pre-release), or publish a
 release with a `v*` tag on GitHub, and the
 [release workflow](.github/workflows/release.yml) does the rest. It runs CI,
 builds the Gate for Linux (amd64, arm64) and Windows, builds the plugin and
-its repository manifest, and publishes everything with `SHA256SUMS`.
+its repository manifest, and publishes everything with `SHA256SUMS` and the
+release manifest. Then sign it from your admin PC with
+`scripts/sign-releases.sh sign`, which checks every file and uploads the
+signature ([docs/RELEASES.md](docs/RELEASES.md)).
 
 ## Development
 

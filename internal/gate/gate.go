@@ -30,6 +30,8 @@ type Config struct {
 	AlertWebhook string
 
 	SessionTTL    time.Duration // default 15m
+	Version       string        // shown in the dashboard; "dev" if unset
+	Updates       *Updates      // nil: no update support
 	ChallengeTTL  time.Duration // default 60s
 	TicketTTL     time.Duration // default 6h
 	MaxTicketTTL  time.Duration // default 24h
@@ -53,6 +55,9 @@ type Config struct {
 }
 
 func (c *Config) setDefaults() {
+	if c.Version == "" {
+		c.Version = "dev"
+	}
 	if c.SessionTTL == 0 {
 		c.SessionTTL = 15 * time.Minute
 	}
@@ -248,6 +253,8 @@ func (g *Gate) routes() http.Handler {
 	mux.HandleFunc("POST /_lanternfish/admin/v1/devices/{id}/revoke", g.admin(g.handleRevokeDevice))
 	g.adminV2Routes(mux)
 	g.adminUIRoutes(mux)
+	mux.HandleFunc("GET /_lanternfish/admin/v2/update", g.admin(g.handleGetUpdate))
+	mux.HandleFunc("POST /_lanternfish/admin/v2/update", g.admin(g.handleRequestUpdate))
 
 	mux.HandleFunc("GET /_lanternfish/{$}", g.serveStatic("index.html"))
 	mux.HandleFunc("GET /_lanternfish/gate-client.js", g.serveStatic("gate-client.js"))

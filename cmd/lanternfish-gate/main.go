@@ -37,6 +37,11 @@ const usage = `Usage:
   lanternfish-gate upstream-key              Print the key for Jellyfin's Lanternfish plugin
   lanternfish-gate version                   Print the version
 
+Updates (signed releases only; see docs/RELEASES.md):
+  lanternfish-gate release-verify MANIFEST SIGNATURE   Check a release signature by hand
+  lanternfish-gate update check              Show the newest verified release
+  lanternfish-gate update apply [-version X] Install it (root; normally done by the updater service)
+
 admin-key, device-ca and upstream-key read the data file directly; stop the Gate first.
 
 Environment:
@@ -55,6 +60,10 @@ Environment:
                                  Jellyfin's web client when the Jellyfin plugin hasn't (default true)
   LANTERNFISH_ADMIN_ALLOW        networks the admin API answers from, comma-separated CIDRs
                                  (default: loopback and private ranges; add 100.64.0.0/10 for Tailscale)
+  LANTERNFISH_RELEASE_KEYS       trusted release signing keys (default /etc/lanternfish/release-keys)
+  LANTERNFISH_AUTO_UPDATE        off (default), patch, minor or all: what the daily updater installs by itself
+  LANTERNFISH_UPDATE_PRERELEASE  true to offer pre-releases
+  LANTERNFISH_UPDATE_REPO        GitHub repository releases come from (default yourmomsbasement/LanternFish-Auth)
 `
 
 func main() {
@@ -76,6 +85,10 @@ func main() {
 		err = deviceCA()
 	case "upstream-key":
 		err = upstreamKey()
+	case "release-verify":
+		err = releaseVerify(args[1:])
+	case "update":
+		err = updateCmd(args[1:])
 	case "version", "--version":
 		fmt.Println(version)
 	case "help", "-h", "--help":
@@ -159,6 +172,15 @@ func serve() error {
 	}
 	defer unlock()
 
+	cfg.Version = version
+	cfg.Updates = gateUpdates()
+	if p := cfg.Updates; p != nil {
+		switch p.AutoPolicy {
+		case "off", "patch", "minor", "all":
+		default:
+			return fmt.Errorf("LANTERNFISH_AUTO_UPDATE must be off, patch, minor or all")
+		}
+	}
 	g, err := gate.New(cfg)
 	if err != nil {
 		return err
