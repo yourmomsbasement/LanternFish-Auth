@@ -53,7 +53,7 @@
     return isNaN(d) ? String(t) : d.toLocaleString();
   }
 
-  function api(method, path, body) {
+  function api(method, path, body, retried) {
     var opts = { method: method, credentials: "same-origin", headers: {} };
     if (method !== "GET") opts.headers["X-Lanternfish-CSRF"] = csrf;
     if (body !== undefined) {
@@ -63,12 +63,17 @@
     return fetch(path, opts).then(function (res) {
       if (res.status === 204) return {};
       return res.json().catch(function () { return {}; }).then(function (data) {
-        if (res.status === 401 && path.indexOf("/session") < 0) {
+        // 401 means the admin session ended, except a wrong re-verification code.
+        if (res.status === 401 && path.indexOf("/session") < 0 && path !== UI + "verify") {
           showSignIn("Your admin session ended. Sign in again.");
           throw new Error("signed out");
         }
+        // Sensitive changes need a fresh authenticator code: ask, then retry once.
+        if (res.status === 403 && data.error === "recent_verification_required" && !retried) {
+          return reverify().then(function () { return api(method, path, body, true); });
+        }
         if (!res.ok) {
-          var err = new Error(data.error || ("HTTP " + res.status));
+          var err = new Error(data.detail || data.error || ("HTTP " + res.status));
           err.status = res.status;
           err.data = data;
           throw err;
@@ -78,6 +83,34 @@
     });
   }
   var V1 = "/_lanternfish/admin/v1/", V2 = "/_lanternfish/admin/v2/", UI = "/_lanternfish/admin/";
+
+  // reverify asks for the linked owner's authenticator code (resolves when
+  // accepted, rejects when cancelled).
+  function reverify() {
+    return new Promise(function (resolve, reject) {
+      var code = h("input", { inputmode: "numeric", autocomplete: "one-time-code", pattern: "[0-9 ]{6,8}", maxlength: "8", required: true, "aria-label": "Authenticator code" });
+      var msg = h("p", { class: "muted small", text: "This change needs your authenticator code (valid for 5 minutes of changes)." });
+      var dlg = h("dialog", { class: "card", oncancel: function () { dlg.remove(); reject(new Error("Not confirmed; nothing was changed.")); } });
+      var form = h("form", { onsubmit: function (e) {
+        e.preventDefault();
+        api("POST", UI + "verify", { code: code.value.replace(/\s/g, "") }).then(function () {
+          dlg.close(); dlg.remove(); resolve();
+        }, function (err) {
+          code.value = "";
+          msg.textContent = err.status === 429 ? "Too many wrong codes; wait a few minutes." : "Code not accepted. Try the next one.";
+          msg.className = "bad small";
+        });
+      } }, h("h2", { text: "Confirm it's you" }), msg, h("div", { class: "row" }, code,
+        h("button", { type: "submit", text: "Confirm" }),
+        h("button", { type: "button", class: "secondary", text: "Cancel", onclick: function () {
+          dlg.close(); dlg.remove(); reject(new Error("Not confirmed; nothing was changed."));
+        } })));
+      add(dlg, form);
+      document.body.appendChild(dlg);
+      dlg.showModal();
+      code.focus();
+    });
+  }
 
   function fail(err) {
     if (err && err.message === "signed out") return;
@@ -155,11 +188,15 @@
     });
     clear(view);
     add(view, h("p", { class: "muted", text: "Loading…" }));
-    loadLookups().then(function () { return tabs[tab](); }).then(function (content) {
+    // A slow tab (Updates asks GitHub) must not replace one opened after it.
+    var gen = ++generation;
+    loadLookups().then(function () { return gen === generation ? tabs[tab]() : null; }).then(function (content) {
+      if (gen !== generation) return;
       clear(view);
       add(view, content);
-    }).catch(fail);
+    }).catch(function (err) { if (gen === generation) fail(err); });
   }
+  var generation = 0;
   Array.prototype.forEach.call(document.querySelectorAll("nav button"), function (b) {
     b.addEventListener("click", function () { flash(""); go(b.dataset.tab); });
   });
@@ -202,15 +239,25 @@
                 flash("Revoked " + d.name + "."); reload();
               }, fail);
             } });
+          var detail = h("tr", { hidden: true }, h("td", { colspan: "7" }));
+          var badges = h("div", { class: "chips" },
+            d.suspended ? h("span", { class: "chip bad", text: "suspended: " + d.suspended.replace(/_/g, " ") }) : null,
+            d.override ? h("span", { class: "chip", text: "own policy" + (d.override.expires_at ? " until " + when(d.override.expires_at) : "") }) : null);
           add(body, h("tr", null,
             h("td", null, h("strong", { text: d.name || "(unnamed)" }), h("div", { class: "muted small" },
-              d.platform + " · ", h("span", { class: "mono", text: d.id }), " · enrolled " + when(d.created_at) + " from " + d.enrolled_from)),
+              d.platform + " · ", h("span", { class: "mono", text: d.id }), " · enrolled " + when(d.created_at) + " from " + d.enrolled_from),
+              badges,
+              h("button", { class: "link small", text: "Details", "aria-expanded": "false", onclick: function (e) {
+                detail.hidden = !detail.hidden;
+                e.target.setAttribute("aria-expanded", String(!detail.hidden));
+                if (!detail.hidden && !detail.firstChild.firstChild) add(detail.firstChild, deviceDetail(d));
+              } })),
             h("td", { text: subjectName(d.subject_id) }),
             h("td", null, prof, h("div", { class: "muted small", text: "v" + d.policy_version })),
             h("td", null, nets),
             h("td", { text: String(d.live_sessions || 0) }),
             h("td", { text: when(d.last_auth_at) }),
-            h("td", null, status)));
+            h("td", null, status)), detail);
         });
         if (!body.firstChild) add(body, h("tr", null, h("td", { colspan: "7", class: "muted", text: "No devices yet. Create a ticket to enroll one." })));
       }
@@ -220,6 +267,90 @@
         h("label", { class: "small" }, showRevoked, " show revoked")), table);
     });
   };
+
+  // deviceDetail: key, location, MAC evidence, own policy and recovery actions.
+  function deviceDetail(d) {
+    var path = V2 + "devices/" + encodeURIComponent(d.id);
+    var box = h("div", { class: "detail" });
+    function kv(k, v) { return [h("dt", { text: k }), h("dd", null, v)]; }
+    add(box, h("dl", null,
+      kv("Key fingerprint", h("span", { class: "mono", text: d.key_fingerprint || "—" })),
+      kv("Countries", d.countries.length ? d.countries.map(function (c) {
+        return (c.country || "unknown (" + c.network + ")") + " via " + c.method + ", until " + when(c.expires_at);
+      }).join("; ") : "none recorded"),
+      kv("Network addresses", d.macs.length ? d.macs.map(function (m) {
+        return m.interface_kind + (m.randomized === "yes" ? " (randomized)" : "") + ", last reported " + when(m.last_seen);
+      }).join("; ") : (d.platform === "web" ? "browsers can't report one" : "none reported")),
+      kv("Own policy", d.override ? "v" + d.override.policy_version + " by " + d.override.set_by + ": " + d.override.reason +
+        (d.override.expires_at ? " (until " + when(d.override.expires_at) + ")" : "") : "none (uses " + profileName(d.profile_id) + ")")));
+
+    var actions = h("div", { class: "row" });
+    add(box, actions);
+    if (d.revoked_at) return box;
+    if (d.suspended) {
+      add(actions, h("button", { class: "secondary", text: "Lift suspension", onclick: function () {
+        if (!confirm("Let " + d.name + " sign in again? Its MAC report changed; resetting enrollment is usually safer.")) return;
+        api("POST", path + "/unsuspend").then(function () { flash("Suspension lifted."); reload(); }, fail);
+      } }));
+    }
+    add(actions, h("button", { class: "secondary", text: d.override ? "Edit own policy" : "Give it its own policy", onclick: function (e) {
+      e.target.disabled = true;
+      overrideEditor(d, path).then(function (el) { add(box, el); }, function (err) { e.target.disabled = false; fail(err); });
+    } }));
+    if (d.override) {
+      add(actions, h("button", { class: "secondary", text: "Remove own policy", onclick: function () {
+        api("DELETE", path + "/override").then(function () { flash(d.name + " uses " + profileName(d.profile_id) + " again."); reload(); }, fail);
+      } }));
+    }
+    add(actions, h("button", { class: "danger", text: "Reset enrollment", onclick: function () {
+      if (!confirm("Reset " + d.name + "? Its key is revoked now and a one-time ticket is issued to enroll it again.")) return;
+      api("POST", path + "/reset-enrollment").then(function (t) {
+        clear(actions);
+        add(actions, ticketBox(t));
+      }, fail);
+    } }));
+    return box;
+  }
+
+  function overrideEditor(d, path) {
+    var load = d.override
+      ? api("GET", V2 + "policy/history?scope=" + encodeURIComponent("device:" + d.id)).then(function (r) {
+        return r.history.filter(function (x) { return x.version === d.override.policy_version; })[0] || r.history[0];
+      })
+      : api("GET", V2 + "policy").then(function (r) {
+        var p = r.profiles.filter(function (x) { return x.scope === d.profile_id; })[0];
+        return p || r.global;
+      });
+    return load.then(function (rec) {
+      var form = policyForm(rec.policy);
+      var reason = h("input", { placeholder: "why (required)", maxlength: "64", size: "30", value: d.override ? d.override.reason : "" });
+      var until = h("input", { type: "datetime-local" });
+      return h("div", { class: "card" }, h("h3", { text: "Own policy for " + d.name }),
+        h("p", { class: "muted small", text: "Applies to this device only, ahead of its profile and the global policy." }),
+        form.el,
+        h("div", { class: "row" }, h("div", { class: "field" }, h("label", { text: "Reason" }), reason),
+          h("div", { class: "field" }, h("label", { text: "Ends (optional, your time)" }), until),
+          h("button", { text: "Save", onclick: function () {
+            var body = { policy: form.value(), reason: reason.value };
+            if (until.value) body.expires_at = new Date(until.value).toISOString();
+            api("PUT", path + "/override", body).then(function () { flash("Saved " + d.name + "'s own policy."); reload(); }, fail);
+          } })));
+    });
+  }
+
+  // ticketBox shows a one-time ticket (and its QR code).
+  function ticketBox(t) {
+    var link = publicOrigin().replace(/\/+$/, "") + "/_lanternfish/#ticket=" + encodeURIComponent(t.ticket);
+    var isWeb = t.platform === "web";
+    var box = h("div", { class: "card ticket" }, h("div", null,
+      h("h3", { text: "Ticket for " + (t.label || t.platform) }),
+      h("p", { class: "small" }, "Shown once. Expires " + when(t.expires_at) + ". Single use."),
+      h("div", { class: "row" }, h("code", { text: t.ticket }), copyButton(t.ticket)),
+      isWeb ? h("div", { class: "row" }, h("code", { text: link }), copyButton(link)) :
+        h("p", { class: "small muted", text: "Enter this ticket in the Lanternfish app on the device (or scan the QR code with it)." })));
+    drawQR(isWeb ? link : t.ticket).then(function (svg) { add(box, svg); }, fail);
+    return box;
+  }
 
   // ---- tickets ----
 
@@ -439,7 +570,8 @@
         field("IPv4 prefix", num(ip, "ipv4_prefix_len", { min: 8, max: 32 }), "32 = exact address"),
         field("IPv6 prefix", num(ip, "ipv6_prefix_len", { min: 32, max: 128 }), "64 recommended")),
       h("div", { class: "row" },
-        field("New network", pick(ip, "on_change", [["key_proof", "allow after a fresh device-key signature"], ["deny", "deny (re-enroll to add networks)"]])),
+        field("New network", pick(ip, "on_change", [["key_proof", "allow after a fresh device-key signature"],
+          ["additional_verification", "ask the owner to verify (see below)"], ["deny", "deny (re-enroll to add networks)"]])),
         field("Approval lasts (seconds)", num(ip, "approval_ttl_seconds", { min: 3600, max: 2592000 })),
         field("Networks remembered", num(ip, "remembered_networks", { min: 1, max: 10 }))),
       h("h3", { text: "Schedule" }),
@@ -468,6 +600,66 @@
         sc.blackout_intervals.push({ start: now.toISOString(), end: new Date(now.getTime() + 3600000).toISOString(), reason: "" });
         renderBlackouts();
       } }));
+    // ---- verification, factors, location, MAC ----
+    var v = p.verification, totp = p.totp, wa = p.webauthn, geo = p.geo, mac = p.mac;
+    function factors(obj, key) {
+      obj[key] = obj[key] || [];
+      return h("span", { class: "days" }, [["totp", "authenticator code"], ["webauthn", "passkey"]].map(function (f) {
+        var c = h("input", { type: "checkbox", checked: obj[key].indexOf(f[0]) >= 0 });
+        c.addEventListener("change", function () {
+          obj[key] = obj[key].filter(function (x) { return x !== f[0]; });
+          if (c.checked) obj[key].push(f[0]);
+        });
+        return h("label", null, c, f[1]);
+      }));
+    }
+    function list(obj, key, placeholder) {
+      var el = h("input", { value: (obj[key] || []).join(", "), placeholder: placeholder, size: "30" });
+      el.addEventListener("change", function () {
+        obj[key] = el.value.split(/[\s,]+/).filter(Boolean).map(function (x) { return x.indexOf("/") >= 0 ? x : x.toUpperCase(); });
+      });
+      return el;
+    }
+    var ACTIONS = [["deny", "deny"], ["additional_verification", "ask the owner to verify"], ["observe", "allow and record"]];
+    add(root,
+      h("h3", { text: "Additional verification" }),
+      h("p", { class: "muted small", text: "When a rule asks for verification, the device waits while its owner proves it's them. All the checked factors are needed." }),
+      h("div", { class: "row" },
+        field("For a new network, country or address", factors(v, "new_network_required_all")),
+        field("To enroll a new device", factors(v, "enrollment_required_all"), "none = a ticket alone enrolls")),
+      h("div", { class: "row" },
+        field("Pending request lasts (seconds)", num(v, "pending_ttl_seconds", { min: 60, max: 1800 })),
+        field("Wrong codes allowed", num(v, "max_failed_code_attempts", { min: 1, max: 10 }))),
+      h("h3", { text: "Authenticator app (TOTP)" }),
+      h("div", { class: "row" },
+        h("label", null, check(totp, "enabled"), " Allow authenticator codes"),
+        field("Clock drift (30-second steps)", num(totp, "allowed_step_drift", { min: 0, max: 2 }), "1 recommended"),
+        h("label", null, check(totp, "recovery_codes"), " Issue recovery codes")),
+      h("h3", { text: "Passkeys (WebAuthn)" }),
+      h("div", { class: "row" },
+        h("label", null, check(wa, "enabled"), " Allow passkeys and security keys"),
+        field("Authenticator models", pick(wa, "attestation", [["none", "any (don't ask)"], ["collect_if_available", "any, record the model"],
+          ["require_trusted", "only FIDO-certified models"]])),
+        field("PIN or biometric", pick(wa, "user_verification", [["required", "required"], ["preferred", "preferred"]])),
+        h("label", null, check(wa, "allow_backup_eligible"), " Accept synced passkeys (iCloud, Google…)")),
+      h("h3", { text: "Location (country)" }),
+      h("p", { class: "muted small", text: "From a local GeoIP database. VPNs and mobile networks often show the wrong country: use as a signal, not proof." }),
+      h("div", { class: "row" },
+        field("Mode", pick(geo, "mode", [["off", "off"], ["observe", "record only"], ["enforce", "enforce"]])),
+        field("Only these countries", list(geo, "country_allowlist", "US, CA"), "ISO codes; empty = any"),
+        field("Never these countries", list(geo, "country_denylist", "e.g. KP"))),
+      h("div", { class: "row" },
+        field("Unknown location", pick(geo, "unknown_action", ACTIONS)),
+        field("Country new to the device", pick(geo, "new_country_action", ACTIONS)),
+        field("Networks exempt from country rules", list(geo, "exempt_networks", "192.168.0.0/16"))),
+      h("h3", { text: "Network address (MAC) reports" }),
+      h("p", { class: "muted small", text: "Only the Lanternfish apps can report one (signed with the device key); browsers can't. Requiring a report belongs on a profile for TVs and apps." }),
+      h("div", { class: "row" },
+        h("label", null, check(mac, "collect"), " Record reports"),
+        h("label", null, check(mac, "require_report"), " Require a report"),
+        field("When it changes", pick(mac, "on_change", [["observe", "allow and record"], ["additional_verification", "ask the owner to verify"],
+          ["reenroll", "suspend the device"]])),
+        field("Report valid for (seconds)", num(mac, "max_observation_age_seconds", { min: 60, max: 86400 }))));
     add(root, h("h3", { text: "Preview" }), week);
     renderWindows();
     renderBlackouts();
@@ -532,6 +724,11 @@
             h("p", { text: r.devices_in_scope + " device(s) use this policy." }),
             r.devices_blocked_now_by_schedule.length ? h("p", { class: "bad", text: r.devices_blocked_now_by_schedule.length + " would be blocked right now by the schedule." }) : null,
             r.devices_needing_network_approval.length ? h("p", { text: r.devices_needing_network_approval.length + " would need to approve their network on next sign-in." }) : null,
+            r.step_up_summary ? h("p", null, "Additional verification asks for: ", h("strong", { text: r.step_up_summary })) : null,
+            Object.keys(r.owners_missing_factors || {}).length ? h("p", { class: "bad", text: "Owners who couldn't verify yet (set up their factors on the Owners tab first): " +
+              Object.keys(r.owners_missing_factors).map(function (id) {
+                return subjectName(id) + " (needs " + r.owners_missing_factors[id].map(function (f) { return f === "totp" ? "authenticator app" : "passkey"; }).join(" and ") + ")";
+              }).join(", ") }) : null,
             (r.warnings || []).map(function (w) { return h("p", { class: "bad", text: w }); }),
             r.schedule_changes && r.schedule_changes.length ? h("div", null, h("p", { class: "small muted", text: "Upcoming changes:" }),
               h("ul", { class: "small" }, r.schedule_changes.map(function (c) { return h("li", { text: c.local + ": access " + c.access }); }))) : null));
@@ -615,14 +812,107 @@
         h("table", null, h("thead", null, h("tr", null, ["Name", "Role", "Status", "Created", ""].map(function (t) { return h("th", { text: t }); }))),
           h("tbody", null, cache.subjects.map(function (s) {
             var active = s.status === "active";
-            return h("tr", null, h("td", { text: s.name }), h("td", { text: s.role }),
+            var detail = h("tr", { hidden: true }, h("td", { colspan: "5" }));
+            return [h("tr", null, h("td", { text: s.name }), h("td", { text: s.role }),
               h("td", { class: active ? "ok" : "bad", text: s.status }), h("td", { text: when(s.created_at) }),
-              h("td", null, h("button", { class: active ? "danger" : "secondary", text: active ? "Turn off" : "Turn on", onclick: function () {
+              h("td", null, h("button", { class: "secondary", text: "Sign-in factors", onclick: function () {
+                detail.hidden = !detail.hidden;
+                if (!detail.hidden) { clear(detail.firstChild); add(detail.firstChild, ownerFactors(s)); }
+              } }), " ", h("button", { class: active ? "danger" : "secondary", text: active ? "Turn off" : "Turn on", onclick: function () {
                 if (active && !confirm("Turn off " + s.name + "? All their devices lose access now.")) return;
                 api("POST", V2 + "subjects/" + encodeURIComponent(s.id) + (active ? "/disable" : "/enable")).then(reload, fail);
-              } })));
+              } }))), detail];
           }))))
     ]);
+  };
+
+  // ownerFactors: what an owner can verify with, and a setup link to add more.
+  function ownerFactors(s) {
+    var path = V2 + "subjects/" + encodeURIComponent(s.id);
+    var box = h("div", { class: "detail" }, h("p", { class: "muted", text: "Loading…" }));
+    api("GET", path + "/factors").then(function (f) {
+      clear(box);
+      var rows = h("dl");
+      add(rows, h("dt", { text: "Authenticator app" }), h("dd", null, f.totp
+        ? ["set up " + when(f.totp.activated_at) + "; " + f.recovery_codes_left + " recovery code(s) left ",
+          h("button", { class: "link", text: "remove", onclick: function () {
+            if (!confirm("Remove " + s.name + "'s authenticator app and recovery codes? Steps that need a code can't be completed until they set one up again.")) return;
+            api("DELETE", path + "/factors/totp").then(function () { clear(box); add(box, ownerFactors(s)); }, fail);
+          } })]
+        : h("span", { class: "muted", text: "not set up" })));
+      add(rows, h("dt", { text: "Passkeys" }), h("dd", null, f.passkeys.length ? h("ul", null, f.passkeys.map(function (k) {
+        return h("li", null, k.name + " — added " + when(k.created_at) + (k.last_used_at ? ", last used " + when(k.last_used_at) : "") +
+          ", " + (k.backup_eligible ? "synced" : "device-bound") + ", model " + k.attestation.replace("_", " ") +
+          (k.clone_warning ? " ⚠ counter warning" : "") + " ",
+          h("button", { class: "link", text: "remove", onclick: function () {
+            if (!confirm("Remove passkey " + k.name + "?")) return;
+            api("DELETE", path + "/factors/passkeys/" + k.index).then(function () { clear(box); add(box, ownerFactors(s)); }, fail);
+          } }));
+      })) : h("span", { class: "muted", text: "none" })));
+      add(box, rows);
+      if (s.status !== "active") return;
+      var replace = h("input", { type: "checkbox" });
+      var out = h("div");
+      add(box, h("div", { class: "row" },
+        h("button", { text: "Create setup link", onclick: function () {
+          api("POST", path + "/setup-link", { replace_totp: replace.checked }).then(function (r) {
+            var link = publicOrigin().replace(/\/+$/, "") + r.path;
+            clear(out);
+            var card = h("div", { class: "card ticket" }, h("div", null,
+              h("h3", { text: "Setup link for " + s.name }),
+              h("p", { class: "small" }, "Anyone with this link can add sign-in factors for " + s.name + " until " + when(r.expires_at) +
+                ". Show the QR code in person or send it privately. Creating another link cancels this one."),
+              h("div", { class: "row" }, h("code", { text: link }), copyButton(link))));
+            add(out, card);
+            drawQR(link).then(function (svg) { add(card, svg); }, fail);
+          }, fail);
+        } }),
+        f.totp ? h("label", { class: "small" }, replace, " let it replace the authenticator app") : null), out);
+    }, fail);
+    return box;
+  }
+
+  // ---- security: deployment status, admin keys ----
+
+  tabs.security = function () {
+    return Promise.all([api("GET", V2 + "status"), api("GET", V2 + "admin-keys")]).then(function (r) {
+      var st = r[0], keys = r[1];
+      var wa = st.webauthn, geo = st.geoip;
+      var me = keys.admin_keys.filter(function (k) { return k.current; })[0];
+      var admins = cache.subjects.filter(function (s) { return s.role === "admin" && s.status === "active"; });
+      var link = h("select", null, h("option", { value: "", text: "not linked" }),
+        admins.map(function (s) { return h("option", { value: s.id, text: s.name }); }));
+      link.value = me ? me.subject_id || "" : "";
+      return [
+        h("div", { class: "card" }, h("h2", { text: "This Gate" }), h("dl", null,
+          h("dt", { text: "Passkeys" }), h("dd", { class: wa.configured ? "ok" : "muted", text: wa.configured
+            ? "on for " + wa.rp_id + " (" + wa.origins.join(", ") + ")" + (wa.trusted_attestation_available ? "; FIDO metadata loaded" : "; no FIDO metadata (\"only certified models\" unavailable)") +
+              (wa.metadata_error ? " — metadata error: " + wa.metadata_error : "")
+            : "off — set LANTERNFISH_WEBAUTHN_RP_ID and LANTERNFISH_WEBAUTHN_ORIGINS" }),
+          h("dt", { text: "Country database" }), h("dd", { class: !geo.configured ? "muted" : (geo.error || geo.stale ? "bad" : "ok"), text: !geo.configured
+            ? "off — set LANTERNFISH_GEOIP_DB to a GeoLite2-Country.mmdb file"
+            : (geo.error ? "error: " + geo.error : "built " + when(geo.built) + " (" + geo.age_days + " days old" + (geo.stale ? ", STALE: lookups return unknown" : "") + ")") }),
+          h("dt", { text: "Your address" }), h("dd", { class: "mono", text: st.client_address }),
+          h("dt", { text: "Server time" }), h("dd", { text: when(st.server_time) }))),
+        h("div", { class: "card" }, h("h2", { text: "Your admin key" }),
+          h("p", { class: "muted small", text: "Link this key to an admin owner with an authenticator app, and changes to policy, owners' factors and updates need a code from that app (asked at most every 5 minutes)." }),
+          h("div", { class: "row" }, h("div", { class: "field" }, h("label", { text: "Linked owner" }), link),
+            h("button", { text: "Save", onclick: function () {
+              api("POST", UI + "link", { subject_id: link.value }).then(function () { flash("Saved."); reload(); }, fail);
+            } })),
+          keys.you_have_factor ? h("p", { class: "ok small", text: "Re-verification is on for this key." }) :
+            h("p", { class: "muted small", text: "Re-verification is off for this key." })),
+        h("div", { class: "card" }, h("h2", { text: "Admin keys" }),
+          h("p", { class: "muted small", text: "Create and revoke keys on the Gate host: lanternfish-gate admin-key create -name NAME -scopes tickets,devices" }),
+          h("table", null, h("thead", null, h("tr", null, ["Name", "Created", "Scopes", "Linked owner", ""].map(function (t) { return h("th", { text: t }); }))),
+            h("tbody", null, keys.admin_keys.map(function (k) {
+              return h("tr", null, h("td", { text: k.name + (k.current ? " (you)" : "") }), h("td", { text: when(k.created_at) }),
+                h("td", { class: "small", text: k.legacy_all_scopes ? "all" : k.scopes.join(", ") }),
+                h("td", { text: k.subject_id ? subjectName(k.subject_id) : "—" }),
+                h("td", { class: k.revoked ? "bad" : "", text: k.revoked ? "revoked" : "" }));
+            }))))
+      ];
+    });
   };
 
   // ---- audit ----

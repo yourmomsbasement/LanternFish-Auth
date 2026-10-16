@@ -1,4 +1,4 @@
-# Lanternfish Gate protocol (v1)
+# Lanternfish Gate protocol (v1 and v2)
 
 Lanternfish Gate is an authenticating reverse proxy that sits in front of
 Jellyfin. Every request has to come from an **enrolled device**. A device
@@ -295,8 +295,10 @@ only sign in from networks it is approved for:
   new network approves it. This stops stolen session tokens, not a stolen
   device key.
 * `on_change: "deny"`: only enrollment approves networks.
-* `additional_verification` (TOTP or WebAuthn) is reserved and rejected until
-  those exist.
+* `on_change: "additional_verification"`: the device's owner approves the new
+  network with the factors in `verification.new_network_required_all`
+  (authenticator code and/or passkey). See [Additional
+  verification](#additional-verification-v2).
 
 Approvals last `approval_ttl_seconds` (1 hour to 30 days). A device keeps at
 most `remembered_networks` (1–10). When a new approval pushes one out, the
@@ -324,6 +326,81 @@ day. Times are judged by the wall clock in that zone:
 Gate's clock decides, never the client's. A session never outlives the
 schedule window it was issued in.
 
+**Verification and factors.**
+
+```json
+"verification": {"new_network_required_all": ["totp"], "enrollment_required_all": [],
+                 "pending_ttl_seconds": 300, "max_failed_code_attempts": 5},
+"totp":     {"enabled": true, "allowed_step_drift": 1, "recovery_codes": true},
+"webauthn": {"enabled": false, "attestation": "collect_if_available",
+             "user_verification": "required", "allow_backup_eligible": true}
+```
+
+`*_required_all` lists factors that are *all* needed (`["webauthn", "totp"]`
+means a passkey and an authenticator code). Every listed factor must be
+enabled, and a policy that asks for verification must list at least one. A
+publish names owners in scope who haven't set those factors up (they can't
+pass verification until they do). `enrollment_required_all` makes enrolling
+a device wait for its owner's approval; v1 enrollment is then refused.
+
+* TOTP is RFC 6238 (SHA-1, 6 digits, 30 seconds). `allowed_step_drift` is 0
+  or 1. A code is accepted once: a step at or before the last accepted one
+  is refused. Recovery codes (10, each single use, stored as hashes) let an
+  owner who lost the app set up a new one; their use is alerted.
+* Passkeys need `LANTERNFISH_WEBAUTHN_RP_ID` and `_ORIGINS`. `attestation`:
+  `none` (don't ask), `collect_if_available` (record what's offered), or
+  `require_trusted` (only models the FIDO metadata service vouches for; needs
+  `LANTERNFISH_WEBAUTHN_MDS`). `allow_backup_eligible: false` refuses synced
+  passkeys. A passkey shows that the owner approved; it doesn't identify the
+  computer.
+
+**Location.**
+
+```json
+"geo": {"mode": "enforce", "country_allowlist": ["US", "CA"], "country_denylist": [],
+        "unknown_action": "deny", "new_country_action": "additional_verification",
+        "exempt_networks": ["192.168.0.0/16"]}
+```
+
+Countries come from a local MaxMind-format database (`LANTERNFISH_GEOIP_DB`,
+e.g. GeoLite2-Country), never an online service. `observe` records the
+country in the audit log; `enforce` applies the lists (the deny list wins) and
+the actions (`deny`, `additional_verification` or `observe`):
+
+* `unknown_action`: private, unlisted and stale-database addresses are
+  *unknown*, never assumed to be home. An unknown approval is tied to the
+  network it was made on.
+* `new_country_action`: a country the device hasn't been approved in (30
+  days). A device's first country is recorded without asking.
+* `exempt_networks` skip country rules (your LAN, a VPN you run).
+
+Sessions are checked per request: one used from another country is refused.
+VPNs and mobile carriers often show the wrong country, so treat this as a
+signal, not proof.
+
+**MAC reports.**
+
+```json
+"mac": {"collect": true, "require_report": false, "on_change": "additional_verification",
+        "max_observation_age_seconds": 600}
+```
+
+Only native apps can report a MAC address; browsers can't. A report is signed
+with the device key along with the session challenge (see [v2
+session](#v2-session)), and stored only as an HMAC tag keyed from the master
+key. `on_change` when a reported address changes: `observe`,
+`additional_verification`, or `reenroll` (the device is suspended until an
+administrator resets or unsuspends it). `require_report` can only be set on a
+profile or device policy, never globally, and never applies to browsers. A
+report shows that the app reported an address; a modified client can lie.
+
+**Precedence.** A device's own policy (an *override*, set by an
+administrator with a reason and optional end time) comes first, then its
+profile's, then the global policy. Revocation, a disabled owner and a
+suspended device are always checked first, and country deny lists and
+schedules are checked before any step-up, so verification never overrides a
+hard rule.
+
 **Upgrading.** A data file from before policies gets a default owner
 (`sub_default`) for its devices and tickets, and a global policy equal to the
 old behaviour: sessions of `LANTERNFISH_SESSION_TTL`, no IP binding, no
@@ -333,6 +410,94 @@ schedule. Nothing changes until you publish a policy. After that,
 **Policy changes** take effect immediately. Sessions issued under an older
 version are re-checked on their next request, and can only get shorter.
 Open streams are re-checked when the policy is published.
+
+## Additional verification (v2)
+
+v1 clients keep working unchanged: where a policy asks for verification,
+`/v1/session` answers `403 additional_verification_required` and they can't
+continue. v2 clients can.
+
+<a id="v2-session"></a>**Session.** `POST /_lanternfish/v2/session` takes the
+v1 body plus `client` (`"browser"`: the session is only set as the HttpOnly
+cookie; `"native"`, the default: also returned as `session_token`) and an
+optional `mac_report`:
+
+```json
+{"device_id": "dev_…", "challenge": "…", "signature": "…", "client": "native",
+ "mac_report": {"interface_kind": "wifi", "mac": "3c:22:fb:01:02:03", "randomized": false,
+                "collected_at": 1792000000, "signature": "…"}}
+```
+
+`interface_kind` is `wifi`, `ethernet`, `cellular` or `other`. The report's
+signature is over `"lanternfish-gate/v2/mac\n" + device_id + "\n" + challenge
++ "\n" + digest`, where `digest` is the hex SHA-256 of `interface_kind`, the
+lower-case colon form of `mac`, `yes`/`no`/`unknown`, and `collected_at` in
+decimal, each preceded by its length as a 4-byte big-endian integer.
+All-zero, all-ones and `02:00:00:00:00:00` addresses are refused. Replies add
+`expires_in_seconds`.
+
+When verification is needed the reply is:
+
+```json
+403 {"error": "additional_verification_required", "verification_id": "lfv_…",
+     "required_all": ["totp"], "reason": "network_changed", "expires_in_seconds": 300}
+```
+
+`verification_id` is a short-lived handle, not a session: it authorizes
+nothing upstream. Reasons: `network_changed`, `new_country`,
+`location_unknown`, `mac_changed`, `new_device`. A device has at most 3
+pending verifications.
+
+**Steps.** All under `/_lanternfish/v2/verification/{id}`, JSON, same-site
+only:
+
+| Method & path | Purpose |
+|---|---|
+| `GET` | Status: `required_all`, `done`, device, network, country, key fingerprint, `expires_in_seconds`, `attempts_left` |
+| `POST …/totp` | `{code}`; `401 code_not_accepted` with `attempts_left` |
+| `POST …/webauthn/options` then `…/webauthn/finish` | A passkey assertion for this verification only (each challenge is used once) |
+| `POST …/recovery` | `{code}`: a recovery code. Returns a `setup_grant` for `/_lanternfish/setup` to set up a new authenticator; it doesn't complete the verification |
+| `POST …/pairing` | Returns `pairing_code` (`XXXX-XXXX`, single use, 10 minutes) for approving on a phone at `/_lanternfish/pair` |
+| `POST …/complete` | A fresh signed challenge (`{device_id, challenge, signature, client}`) once every factor is done → the session reply |
+
+Wrong codes count against the verification (`max_failed_code_attempts`, then
+it ends) and the owner (10 per 15 minutes across all their verifications).
+`complete` requires the same device, the same network (and country) the
+verification started on, and the same policy version; otherwise it answers
+`409 verification_restart` with a reason, and the client starts again.
+Completing approves the network (and country) as *verified*. Revoking the
+device, disabling the owner or a new policy version cancels pending
+verifications.
+
+On a TV, the app shows the pairing code and `https://host/_lanternfish/pair`;
+the owner enters the code on their phone, sees the device name, network,
+country and key fingerprint, and passes the factors there. The TV polls the
+status and completes when it's done. The code only finds the verification;
+every factor is still required.
+
+**Enrollment.** `POST /_lanternfish/v2/enrollment/begin` takes the v1 enroll
+body. Without `enrollment_required_all` it enrolls at once (`201 {"status":
+"enrolled", "device": …}`). Otherwise it reserves the ticket and answers `202
+{"status": "verification_required", "verification_id": …, "required_all":
+…}`. Another attempt with that ticket gets `409` until the reservation ends.
+After the owner approves, `POST
+/_lanternfish/v2/enrollment/{id}/finish` with `{ticket, proof}` (the same key)
+enrolls the device and approves its network. Repeating `finish` returns the
+same device, so a lost reply can be fetched again.
+
+Tickets can be bound to a key: `key_fingerprint` (from the device's public
+key, as shown by the app) on ticket creation makes any other key's enrollment
+fail.
+
+**Factor setup.** Owners set up factors with a setup link from an
+administrator (`/_lanternfish/setup#grant=…`, 30 minutes, one live link per
+owner; the grant is in the URL fragment and never reaches a server log).
+Endpoints under `/_lanternfish/v2/factors/`: `setup/info`, `totp/setup` (secret
+and `otpauth://` URI), `totp/confirm` (`{grant, code}` → 10 recovery codes,
+shown once), `recovery-codes` (new set, old ones stop working),
+`passkey/options` and `passkey/finish` (grant in `X-Lanternfish-Grant`),
+`done`. Replacing an existing authenticator needs a link issued with
+`replace_totp` or a recovery-code grant.
 
 ## Signed requests to Jellyfin
 
@@ -407,8 +572,28 @@ admin password.
 | `GET /_lanternfish/admin/v1/devices` | List devices |
 | `POST /_lanternfish/admin/v1/devices/{id}/revoke` | Revoke a device |
 
-Tickets also take `subject_id` (the owner; default `sub_default`) and
-`profile_id` (the device's policy profile; default: the global policy).
+Tickets also take `subject_id` (the owner; default `sub_default`),
+`profile_id` (the device's policy profile; default: the global policy) and
+`key_fingerprint` (bind the ticket to one device key).
+
+**Scopes.** Admin keys can be limited with `admin-key create -scopes`:
+`tickets`, `devices`, `policy-read`, `policy-write`, `owners`,
+`factor-recovery`, `audit`, `updates`. A key without scopes (older keys
+included) has all of them. A request outside the key's scopes gets `403
+scope_required`.
+
+**Re-verification.** Link an admin key to an owner with the `admin` role
+(`admin-key link ID SUBJECT`, or the dashboard's Security tab). Once that owner
+has an authenticator app, dashboard changes in the sensitive scopes
+(`policy-write`, `owners`, `factor-recovery`, `updates`) answer `403
+recent_verification_required` unless the dashboard session passed `POST
+/_lanternfish/admin/verify {code}` in the last 5 minutes. Bearer-key requests
+(the Builder, scripts) aren't affected; protect those keys with scopes.
+
+**Break-glass.** If the admin owner loses their authenticator and recovery
+codes, stop the Gate and run `lanternfish-gate factor reset SUBJECT` on the
+host. It removes that owner's authenticator, recovery codes and passkeys and
+is audited.
 
 The admin dashboard at `/_lanternfish/admin/` uses the same API. `POST
 /_lanternfish/admin/session` with `{"key": "lfa_…"}` (JSON content type,
@@ -440,6 +625,16 @@ Admin API v2 (same guard):
 | `POST /_lanternfish/admin/v2/qr` | `{text}` → QR code modules, for showing an enrollment link |
 | `GET /_lanternfish/admin/v2/update?refresh=1` | Running version, newest verified release, recent releases and their signature status, the updater's last result |
 | `POST /_lanternfish/admin/v2/update` | `{version}`: ask the updater to install the newest verified release (`202`); see [RELEASES.md](RELEASES.md) |
+| `GET /_lanternfish/admin/v2/status` | What this Gate supports: passkeys (RP ID, origins, metadata), GeoIP database health |
+| `GET /_lanternfish/admin/v2/admin-keys` | Admin keys with scopes and linked owners (no secrets) |
+| `GET /_lanternfish/admin/v2/subjects/{id}/factors` | An owner's authenticator app, passkeys and recovery codes left |
+| `POST /_lanternfish/admin/v2/subjects/{id}/setup-link` | `{replace_totp?}` → `{path, expires_at}`; cancels the owner's previous link |
+| `DELETE /_lanternfish/admin/v2/subjects/{id}/factors/totp` | Remove the authenticator app and recovery codes |
+| `DELETE /_lanternfish/admin/v2/subjects/{id}/factors/passkeys/{n}` | Remove a passkey |
+| `PUT`/`DELETE /_lanternfish/admin/v2/devices/{id}/override` | `{policy, reason, expires_at?}`: the device's own policy |
+| `POST /_lanternfish/admin/v2/devices/{id}/reset-enrollment` | Revoke the device and return a replacement ticket |
+| `POST /_lanternfish/admin/v2/devices/{id}/unsuspend` | Lift a suspension (after a MAC change under `reenroll`) |
+| `POST /_lanternfish/admin/verify` / `link` | Dashboard re-verification `{code}`; link the key to an admin owner `{subject_id}` |
 
 ## Abuse controls
 

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -30,9 +31,13 @@ const usage = `Usage:
   lanternfish-gate gen-master-key [flags]    Print a new master key
       -dpapi FILE   (Windows) write it DPAPI-protected to FILE instead
       -machine      with -dpapi, protect for this machine rather than this user
-  lanternfish-gate admin-key create -name NAME
+  lanternfish-gate admin-key create -name NAME [-scopes tickets,devices,...]
   lanternfish-gate admin-key list
   lanternfish-gate admin-key revoke ID
+  lanternfish-gate admin-key link ID SUBJECT  Link a key to an admin owner (dashboard re-verification)
+  lanternfish-gate factor list               Owners and their factors
+  lanternfish-gate factor reset SUBJECT      Break-glass: remove an owner's authenticator app,
+                                             passkeys and recovery codes (then send a setup link)
   lanternfish-gate device-ca                 Print the device CA certificate
   lanternfish-gate upstream-key              Print the key for Jellyfin's Lanternfish plugin
   lanternfish-gate version                   Print the version
@@ -42,7 +47,7 @@ Updates (signed releases only; see docs/RELEASES.md):
   lanternfish-gate update check              Show the newest verified release
   lanternfish-gate update apply [-version X] Install it (root; normally done by the updater service)
 
-admin-key, device-ca and upstream-key read the data file directly; stop the Gate first.
+admin-key, factor, device-ca and upstream-key read the data file directly; stop the Gate first.
 
 Environment:
   LANTERNFISH_LISTEN             listen address (default :8443)
@@ -60,6 +65,13 @@ Environment:
                                  Jellyfin's web client when the Jellyfin plugin hasn't (default true)
   LANTERNFISH_ADMIN_ALLOW        networks the admin API answers from, comma-separated CIDRs
                                  (default: loopback and private ranges; add 100.64.0.0/10 for Tailscale)
+  LANTERNFISH_WEBAUTHN_RP_ID     passkey relying party ID, e.g. flix.example.com (enables WebAuthn)
+  LANTERNFISH_WEBAUTHN_ORIGINS   exact https origins passkeys may be used from, comma-separated
+  LANTERNFISH_WEBAUTHN_RP_NAME   name shown by authenticators (default Lanternfish)
+  LANTERNFISH_WEBAUTHN_MDS       cache file for FIDO metadata; enables attestation "require_trusted"
+  LANTERNFISH_GEOIP_DB           local country database (GeoLite2-Country.mmdb); enables geo rules
+  LANTERNFISH_GEOIP_MAX_AGE      when the database counts as stale (default 1080h, 45 days)
+  LANTERNFISH_AUDIT_MAX_MB       rotate the audit log at this size, keeping 3 old files (default 20)
   LANTERNFISH_RELEASE_KEYS       trusted release signing keys (default /etc/lanternfish/release-keys)
   LANTERNFISH_AUTO_UPDATE        off (default), patch, minor or all: what the daily updater installs by itself
   LANTERNFISH_UPDATE_PRERELEASE  true to offer pre-releases
@@ -81,6 +93,8 @@ func main() {
 		err = genMasterKey(args[1:])
 	case "admin-key":
 		err = adminKey(args[1:])
+	case "factor":
+		err = factorCmd(args[1:])
 	case "device-ca":
 		err = deviceCA()
 	case "upstream-key":
@@ -142,6 +156,29 @@ func loadConfig() (gate.Config, error) {
 			return cfg, fmt.Errorf("LANTERNFISH_INJECT_RENEWAL must be true or false")
 		}
 		cfg.DisableRenewalInjection = !on
+	}
+	cfg.WebAuthnRPID = os.Getenv("LANTERNFISH_WEBAUTHN_RP_ID")
+	cfg.WebAuthnRPName = os.Getenv("LANTERNFISH_WEBAUTHN_RP_NAME")
+	cfg.WebAuthnMDSPath = os.Getenv("LANTERNFISH_WEBAUTHN_MDS")
+	if v := os.Getenv("LANTERNFISH_WEBAUTHN_ORIGINS"); v != "" {
+		for _, o := range strings.Split(v, ",") {
+			cfg.WebAuthnOrigins = append(cfg.WebAuthnOrigins, strings.TrimSpace(o))
+		}
+	}
+	cfg.GeoIPPath = os.Getenv("LANTERNFISH_GEOIP_DB")
+	if v := os.Getenv("LANTERNFISH_GEOIP_MAX_AGE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 24*time.Hour {
+			return cfg, fmt.Errorf("LANTERNFISH_GEOIP_MAX_AGE must be a duration of at least 24h, e.g. 1080h")
+		}
+		cfg.GeoIPMaxAge = d
+	}
+	if v := os.Getenv("LANTERNFISH_AUDIT_MAX_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 10000 {
+			return cfg, fmt.Errorf("LANTERNFISH_AUDIT_MAX_MB must be a number of megabytes")
+		}
+		cfg.AuditMaxBytes = int64(n) << 20
 	}
 	if v := os.Getenv("LANTERNFISH_SESSION_TTL"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -261,6 +298,37 @@ func openOffline() (*gate.Admin, func(), error) {
 	return a, unlock, nil
 }
 
+func factorCmd(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: factor list | factor reset SUBJECT_ID")
+	}
+	a, unlock, err := openOffline()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	switch args[0] {
+	case "list":
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "ID\tNAME\tROLE\tSTATUS\tAUTHENTICATOR\tPASSKEYS\tRECOVERY CODES LEFT")
+		for _, s := range a.Subjects() {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%v\t%d\t%d\n", s.ID, s.Name, s.Role, s.Status, s.TOTP, s.Passkeys, s.Recovery)
+		}
+		tw.Flush()
+	case "reset":
+		if len(args) != 2 {
+			return errors.New("usage: factor reset SUBJECT_ID")
+		}
+		if err := a.ResetFactors(args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("Removed every factor of %s. Start the Gate and send them a new setup link from the dashboard.\n", args[1])
+	default:
+		return fmt.Errorf("unknown factor command %q", args[0])
+	}
+	return nil
+}
+
 func adminKey(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: admin-key create -name NAME | list | revoke ID")
@@ -274,11 +342,18 @@ func adminKey(args []string) error {
 	case "create":
 		fs := flag.NewFlagSet("admin-key create", flag.ExitOnError)
 		name := fs.String("name", "", "who will use this key, e.g. builder")
+		scopes := fs.String("scopes", "", "comma-separated scopes (default: all): "+strings.Join(gate.AllScopes(), ","))
 		fs.Parse(args[1:])
 		if *name == "" {
 			return errors.New("-name is required")
 		}
-		id, key, err := a.CreateAdminKey(*name)
+		var list []string
+		if *scopes != "" {
+			for _, s := range strings.Split(*scopes, ",") {
+				list = append(list, strings.TrimSpace(s))
+			}
+		}
+		id, key, err := a.CreateAdminKey(*name, list...)
 		if err != nil {
 			return err
 		}
@@ -294,6 +369,14 @@ func adminKey(args []string) error {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", k.ID, k.Name, k.CreatedAt.Format(time.RFC3339), revoked)
 		}
 		tw.Flush()
+	case "link":
+		if len(args) != 3 {
+			return errors.New("usage: admin-key link ID SUBJECT_ID   (\"\" to unlink)")
+		}
+		if err := a.LinkAdminKey(args[1], args[2]); err != nil {
+			return err
+		}
+		fmt.Printf("Linked %s to %q\n", args[1], args[2])
 	case "revoke":
 		if len(args) != 2 {
 			return errors.New("usage: admin-key revoke ID")

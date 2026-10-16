@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Approve sign-in · Lanternfish Gate</title>
+<link rel="stylesheet" href="/_lanternfish/style.css">
+</head>
+<body>
+<main>
+  <h1>Approve this sign-in</h1>
+  <p id="status" role="status">Loading…</p>
+  <p id="detail" class="muted"></p>
+
+  <form id="totp" hidden>
+    <label for="code">Authenticator app code</label>
+    <input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="8" required placeholder="123456">
+    <button type="submit">Verify code</button>
+    <button type="button" id="lost" class="link">Lost your authenticator? Use a recovery code</button>
+  </form>
+
+  <form id="recovery" hidden>
+    <label for="rcode">Recovery code</label>
+    <input id="rcode" autocomplete="off" spellcheck="false" required placeholder="xxxx-xxxx-xxxx">
+    <button type="submit">Use recovery code</button>
+  </form>
+
+  <div id="passkey" hidden>
+    <button type="button" id="passkeyButton">Verify with a passkey or security key</button>
+  </div>
+
+  <div id="pairing" hidden>
+    <button type="button" id="pairButton" class="secondary">Approve on my phone instead</button>
+    <p id="pairInfo" hidden></p>
+  </div>
+</main>
+<script src="/_lanternfish/gate-client.js"></script>
+<script src="/_lanternfish/webauthn.js"></script>
+<script src="/_lanternfish/verify.js"></script>
+</body>
+</html>

@@ -35,11 +35,12 @@ const (
 )
 
 type adminSession struct {
-	keyID    string
-	csrf     string
-	ip       string
-	created  time.Time
-	lastUsed time.Time
+	keyID      string
+	csrf       string
+	ip         string
+	created    time.Time
+	lastUsed   time.Time
+	verifiedAt time.Time // last authenticator check (re-verification)
 }
 
 type adminSessionTable struct {
@@ -97,6 +98,15 @@ func (t *adminSessionTable) use(token, ip string, now time.Time) (adminSession, 
 	return *s, true
 }
 
+// markVerified records a successful re-verification for a session.
+func (t *adminSessionTable) markVerified(token string, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if s, ok := t.byHash[hashToken(token)]; ok {
+		s.verifiedAt = now
+	}
+}
+
 func (t *adminSessionTable) remove(token string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -133,10 +143,10 @@ func (g *Gate) adminUIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+adminPath+"/admin.js", g.adminPage("admin.js"))
 	mux.HandleFunc("GET "+adminPath+"/admin.css", g.adminPage("admin.css"))
 	mux.HandleFunc("POST "+adminPath+"/session", g.handleAdminSignIn)
-	mux.HandleFunc("GET "+adminPath+"/session", g.admin(g.handleAdminWhoAmI))
+	mux.HandleFunc("GET "+adminPath+"/session", g.admin(scopeAny, g.handleAdminWhoAmI))
 	mux.HandleFunc("POST "+adminPath+"/logout", g.handleAdminSignOut)
-	mux.HandleFunc("GET "+adminPath+"/v2/audit", g.admin(g.handleAudit))
-	mux.HandleFunc("POST "+adminPath+"/v2/qr", g.admin(g.handleQR))
+	mux.HandleFunc("GET "+adminPath+"/v2/audit", g.admin(scopeAudit, g.handleAudit))
+	mux.HandleFunc("POST "+adminPath+"/v2/qr", g.admin(scopeTickets, g.handleQR))
 }
 
 // adminPage serves a dashboard file, only on the admin networks.
@@ -219,22 +229,22 @@ func (g *Gate) handleAdminSignOut(w http.ResponseWriter, r *http.Request) {
 
 // adminFromCookie authenticates a dashboard request. Changes need the CSRF
 // header too.
-func (g *Gate) adminFromCookie(r *http.Request) (*AdminKey, string) {
+func (g *Gate) adminFromCookie(r *http.Request) (*AdminKey, *adminSession, string) {
 	c, err := r.Cookie(adminCookie)
 	if err != nil {
-		return nil, ""
+		return nil, nil, ""
 	}
 	s, ok := g.adminSessions.use(c.Value, clientIP(r), g.cfg.Now())
 	if !ok {
-		return nil, "admin session expired; sign in again"
+		return nil, nil, "admin session expired; sign in again"
 	}
 	if crossSite(r) {
-		return nil, "cross-site request refused"
+		return nil, nil, "cross-site request refused"
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		got := r.Header.Get(csrfHeader)
 		if subtle.ConstantTimeCompare([]byte(got), []byte(s.csrf)) != 1 {
-			return nil, "missing or wrong " + csrfHeader + " header"
+			return nil, nil, "missing or wrong " + csrfHeader + " header"
 		}
 	}
 	var key *AdminKey
@@ -246,9 +256,9 @@ func (g *Gate) adminFromCookie(r *http.Request) (*AdminKey, string) {
 	})
 	if key == nil {
 		g.adminSessions.removeKey(s.keyID)
-		return nil, "admin key revoked"
+		return nil, nil, "admin key revoked"
 	}
-	return key, ""
+	return key, &s, ""
 }
 
 // handleAudit returns recent audit entries, newest first, from the end of
@@ -328,10 +338,20 @@ func (g *Gate) handleQR(w http.ResponseWriter, r *http.Request, _ *AdminKey) {
 		writeError(w, http.StatusBadRequest, "malformed request")
 		return
 	}
-	m, err := qrEncode([]byte(req.Text))
+	rows, err := qrRows(req.Text)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"size": len(rows), "rows": rows})
+}
+
+// qrRows encodes text as QR modules, one "0101…" string per row.
+func qrRows(text string) ([]string, error) {
+	m, err := qrEncode([]byte(text))
+	if err != nil {
+		return nil, err
 	}
 	rows := make([]string, len(m))
 	for y, row := range m {
@@ -344,6 +364,5 @@ func (g *Gate) handleQR(w http.ResponseWriter, r *http.Request, _ *AdminKey) {
 		}
 		rows[y] = string(b)
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"size": len(m), "rows": rows})
+	return rows, nil
 }

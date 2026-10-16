@@ -93,150 +93,6 @@ func cleanName(s string) string {
 
 // ---- Device endpoints ----
 
-type enrollRequest struct {
-	Ticket    string `json:"ticket"`
-	PublicKey string `json:"public_key,omitempty"`
-	Proof     string `json:"proof,omitempty"`
-	Name      string `json:"name,omitempty"`
-}
-
-type enrollResponse struct {
-	DeviceID      string `json:"device_id"`
-	Kind          string `json:"kind"`
-	Certificate   string `json:"certificate,omitempty"`
-	CACertificate string `json:"ca_certificate,omitempty"`
-	Secret        string `json:"secret,omitempty"`
-}
-
-func (g *Gate) handleEnroll(w http.ResponseWriter, r *http.Request) {
-	if !g.guard(w, r) {
-		return
-	}
-	var req enrollRequest
-	if err := g.readJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed request")
-		return
-	}
-	now := g.cfg.Now()
-	ticketHash := hashToken(req.Ticket)
-
-	var ticket Ticket
-	found := false
-	g.store.View(func(d *storeData) {
-		if t := d.ticketByHash(ticketHash); t != nil && now.Before(t.ExpiresAt) {
-			ticket, found = *t, true
-		}
-	})
-	if !found {
-		g.fail(w, r, http.StatusUnauthorized, "enroll_failed", "ticket invalid, used or expired", nil)
-		return
-	}
-	kind := platformKinds[ticket.Platform]
-	fields := map[string]any{"ticket_id": ticket.ID, "platform": ticket.Platform}
-
-	dev := &Device{
-		ID:           newID("dev_"),
-		Name:         ticket.Label,
-		Platform:     ticket.Platform,
-		Kind:         kind,
-		CreatedAt:    now,
-		EnrolledFrom: clientIP(r),
-		SubjectID:    ticket.SubjectID,
-		ProfileID:    ticket.ProfileID,
-	}
-	if dev.SubjectID == "" {
-		dev.SubjectID = defaultSubjectID
-	}
-	// The ticket was delivered to this network by the administrator, so
-	// enrolling approves it (when the device's policy binds to networks).
-	if pol := g.policyFor(dev); pol.Policy.IP.Enabled {
-		dev.Networks = []NetworkApproval{{ID: newID("net_"), Network: networkKey(dev.EnrolledFrom, pol.Policy.IP),
-			Method: "enrollment", ApprovedAt: now, ExpiresAt: now.Add(pol.approvalTTL()), PolicyVersion: pol.Version}}
-	}
-	if dev.Name == "" {
-		dev.Name = cleanName(req.Name)
-	}
-	resp := enrollResponse{DeviceID: dev.ID, Kind: kind}
-
-	switch kind {
-	case KindECDSA:
-		spki, err := decodeB64(req.PublicKey)
-		if err != nil {
-			g.fail(w, r, http.StatusBadRequest, "enroll_failed", "public_key is not base64", fields)
-			return
-		}
-		pub, err := parseP256PublicKey(spki)
-		if err != nil {
-			g.fail(w, r, http.StatusBadRequest, "enroll_failed", "public_key must be an ECDSA P-256 SubjectPublicKeyInfo", fields)
-			return
-		}
-		proof, err := decodeB64(req.Proof)
-		if err != nil || !verifyP256(pub, enrollMessage(req.Ticket), proof) {
-			g.fail(w, r, http.StatusUnauthorized, "enroll_failed", "proof signature invalid", fields)
-			return
-		}
-		cert, err := g.ca.issue(dev.ID, pub, now)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "could not issue certificate")
-			return
-		}
-		dev.PublicKey = spki
-		resp.Certificate = string(cert)
-		resp.CACertificate = string(g.ca.certPEM)
-	case KindHMAC:
-		if req.PublicKey != "" || req.Proof != "" {
-			writeError(w, http.StatusBadRequest, "roku tickets take no public_key or proof")
-			return
-		}
-		secret := randomBytes(32)
-		dev.SealedSecret = g.sealer.Seal("device-secret:"+dev.ID, secret)
-		resp.Secret = encodeB64(secret)
-	default:
-		writeError(w, http.StatusInternalServerError, "ticket has unknown platform")
-		return
-	}
-
-	errUsed := errors.New("ticket already used")
-	errDup := errors.New("public key already enrolled")
-	err := g.store.Update(func(d *storeData) error {
-		if _, ok := d.Tickets[ticket.ID]; !ok {
-			return errUsed
-		}
-		if dev.PublicKey != nil {
-			for _, other := range d.Devices {
-				if string(other.PublicKey) == string(dev.PublicKey) {
-					return errDup
-				}
-			}
-		}
-		if dev.ProfileID != "" && d.Profiles[dev.ProfileID] == nil {
-			dev.ProfileID = "" // profile deleted since the ticket was made: global policy
-		}
-		delete(d.Tickets, ticket.ID)
-		d.Devices[dev.ID] = dev
-		return nil
-	})
-	switch {
-	case errors.Is(err, errUsed):
-		g.fail(w, r, http.StatusUnauthorized, "enroll_failed", "ticket invalid, used or expired", fields)
-		return
-	case errors.Is(err, errDup):
-		g.fail(w, r, http.StatusConflict, "enroll_failed", err.Error(), fields)
-		return
-	case err != nil:
-		writeError(w, http.StatusInternalServerError, "could not save device")
-		return
-	}
-
-	fields["device_id"] = dev.ID
-	fields["name"] = dev.Name
-	fields["ip"] = dev.EnrolledFrom
-	g.audit.write(now, "enrolled", fields)
-	g.alerts.send(fmt.Sprintf("🏮 New device enrolled on Lanternfish Gate: %q (%s, %s) from %s",
-		dev.Name, dev.Platform, dev.ID, dev.EnrolledFrom))
-	writeJSON(w, http.StatusCreated, resp)
-}
-
 func (g *Gate) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	if !g.guard(w, r) {
 		return
@@ -256,60 +112,6 @@ func (g *Gate) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"challenge": value, "expires_at": exp.UTC()})
-}
-
-func (g *Gate) handleSession(w http.ResponseWriter, r *http.Request) {
-	if !g.guard(w, r) {
-		return
-	}
-	var req struct {
-		DeviceID  string `json:"device_id"`
-		Challenge string `json:"challenge"`
-		Signature string `json:"signature"`
-	}
-	if err := g.readJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed request")
-		return
-	}
-	now := g.cfg.Now()
-	fields := map[string]any{"device_id": req.DeviceID}
-	if !g.challenges.consume(req.Challenge, req.DeviceID, now) {
-		g.fail(w, r, http.StatusUnauthorized, "session_failed", "challenge invalid, used or expired", fields)
-		return
-	}
-	dev := g.activeDevice(req.DeviceID)
-	sig, sigErr := decodeB64(req.Signature)
-	if dev == nil || sigErr != nil || !g.verifyDevice(dev, sessionMessage(req.DeviceID, req.Challenge), sig) {
-		g.fail(w, r, http.StatusUnauthorized, "session_failed", "signature not accepted", fields)
-		return
-	}
-
-	// The signed challenge is a fresh proof of the device key; the policy
-	// decides whether that's enough here and now.
-	d := g.authorizeKeyProof(dev, clientIP(r), now)
-	if d.outcome != outAllow {
-		g.denySession(w, r, dev, d, now)
-		return
-	}
-	exp := earliest(now.Add(d.pol.sessionTTL()), d.expires)
-	token := g.sessions.create(session{deviceID: dev.ID, expires: exp, network: d.network,
-		version: d.pol.Version, hardEnd: d.hardEnd}, now, d.pol.Policy.Session.MaxPerDevice)
-	g.noteAuth(dev, now)
-	maxAge := int(exp.Sub(now).Seconds())
-	if maxAge < 1 {
-		maxAge = 1
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    token,
-		Path:     "/",
-		Expires:  exp,
-		MaxAge:   maxAge,
-		Secure:   true,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-	writeJSON(w, http.StatusOK, map[string]any{"session_token": token, "expires_at": exp.UTC()})
 }
 
 // denySession answers a correctly signed sign-in the policy doesn't allow.
@@ -343,12 +145,24 @@ func (g *Gate) verifyDevice(dev *Device, msg, sig []byte) bool {
 	return false
 }
 
+// handleLogout ends the session it was called with, and closes the
+// streams that session opened.
 func (g *Gate) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Same order as other changes that take access away (see accessChanged).
+	var ended []string
 	if t := r.Header.Get(sessionHeader); t != "" {
 		g.sessions.remove(t)
+		ended = append(ended, hashToken(t))
 	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		g.sessions.remove(c.Value)
+		ended = append(ended, hashToken(c.Value))
+	}
+	if len(ended) > 0 {
+		g.accessChanged()
+		for _, h := range ended {
+			g.streams.cancelSession(h)
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
 		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
@@ -359,7 +173,37 @@ func (g *Gate) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 type adminHandler func(w http.ResponseWriter, r *http.Request, key *AdminKey)
 
-func (g *Gate) admin(h adminHandler) http.HandlerFunc {
+// Admin scopes. Keys made before scopes existed (no scopes stored) have all
+// of them; sensitive ones need a recent re-verification in the dashboard
+// once the key is linked to an owner with an authenticator app.
+const (
+	scopeAny            = ""
+	scopeTickets        = "tickets"
+	scopeDevices        = "devices"
+	scopePolicyRead     = "policy-read"
+	scopePolicyWrite    = "policy-write"
+	scopeOwners         = "owners"
+	scopeFactorRecovery = "factor-recovery"
+	scopeAudit          = "audit"
+	scopeUpdates        = "updates"
+)
+
+var allScopes = []string{scopeTickets, scopeDevices, scopePolicyRead, scopePolicyWrite, scopeOwners,
+	scopeFactorRecovery, scopeAudit, scopeUpdates}
+
+var sensitiveScopes = map[string]bool{scopePolicyWrite: true, scopeOwners: true, scopeFactorRecovery: true, scopeUpdates: true}
+
+// recentVerification is how long a dashboard re-verification lasts.
+const recentVerification = 5 * time.Minute
+
+func (k *AdminKey) hasScope(scope string) bool {
+	if scope == scopeAny || k.Scopes == nil {
+		return true
+	}
+	return contains(k.Scopes, scope)
+}
+
+func (g *Gate) admin(scope string, h adminHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Outside the allowed networks the admin API doesn't exist at all.
 		if !g.adminAllowed(clientIP(r)) {
@@ -373,10 +217,11 @@ func (g *Gate) admin(h adminHandler) http.HandlerFunc {
 		auth := r.Header.Get("Authorization")
 		token, ok := strings.CutPrefix(auth, "Bearer ")
 		var key *AdminKey
+		var sess *adminSession
 		if auth == "" {
 			// The dashboard: a session cookie plus, for changes, the CSRF header.
 			var why string
-			if key, why = g.adminFromCookie(r); key == nil {
+			if key, sess, why = g.adminFromCookie(r); key == nil {
 				// No credential at all guesses nothing, so it doesn't count
 				// toward the failure limit (the dashboard asks on every load).
 				if why == "" {
@@ -398,6 +243,18 @@ func (g *Gate) admin(h adminHandler) http.HandlerFunc {
 			g.fail(w, r, http.StatusUnauthorized, "admin_auth_failed", "admin key required", map[string]any{"path": r.URL.Path})
 			return
 		}
+		if !key.hasScope(scope) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "scope_required", "scope": scope})
+			return
+		}
+		// SECURITY: in the dashboard, weakening changes need the admin to
+		// have proved their authenticator within the last five minutes.
+		if sess != nil && sensitiveScopes[scope] && r.Method != http.MethodGet && g.adminHasFactor(key) &&
+			g.cfg.Now().Sub(sess.verifiedAt) > recentVerification {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "recent_verification_required",
+				"detail": "confirm with your authenticator code first"})
+			return
+		}
 		h(w, r, key)
 	}
 }
@@ -409,6 +266,9 @@ func (g *Gate) handleCreateTicket(w http.ResponseWriter, r *http.Request, key *A
 		TTLSeconds int    `json:"ttl_seconds"`
 		SubjectID  string `json:"subject_id"`
 		ProfileID  string `json:"profile_id"`
+		// KeyFingerprint binds the ticket to one device key (the fingerprint
+		// the device shows before enrolling); a stolen ticket is then useless.
+		KeyFingerprint string `json:"key_fingerprint"`
 	}
 	if err := g.readJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "malformed request")
@@ -440,9 +300,15 @@ func (g *Gate) handleCreateTicket(w http.ResponseWriter, r *http.Request, key *A
 		ExpiresAt: now.Add(ttl),
 		SubjectID: req.SubjectID,
 		ProfileID: req.ProfileID,
+
+		KeyFingerprint: strings.ToLower(strings.TrimSpace(req.KeyFingerprint)),
 	}
 	if t.SubjectID == "" {
 		t.SubjectID = defaultSubjectID
+	}
+	if fp := t.KeyFingerprint; fp != "" && (len(fp) != 19 || strings.Count(fp, ":") != 3) {
+		writeError(w, http.StatusBadRequest, "key_fingerprint must look like 1a2b:3c4d:5e6f:7a8b")
+		return
 	}
 	errSubject := errors.New("no such subject")
 	errProfile := errors.New("no such profile")
@@ -469,10 +335,11 @@ func (g *Gate) handleCreateTicket(w http.ResponseWriter, r *http.Request, key *A
 	g.audit.write(now, "ticket_created", map[string]any{
 		"ticket_id": t.ID, "platform": t.Platform, "label": t.Label, "admin_key": key.Name, "ip": clientIP(r),
 		"expires_at": t.ExpiresAt.UTC(), "subject_id": t.SubjectID, "profile_id": t.ProfileID,
+		"key_fingerprint": t.KeyFingerprint,
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": t.ID, "ticket": value, "platform": t.Platform, "label": t.Label, "expires_at": t.ExpiresAt.UTC(),
-		"subject_id": t.SubjectID, "profile_id": t.ProfileID,
+		"subject_id": t.SubjectID, "profile_id": t.ProfileID, "key_fingerprint": t.KeyFingerprint,
 	})
 }
 
@@ -533,6 +400,20 @@ type deviceView struct {
 	PolicyVersion int               `json:"policy_version"`
 	Networks      []NetworkApproval `json:"networks"`
 	LiveSessions  int               `json:"live_sessions"`
+
+	KeyFingerprint string            `json:"key_fingerprint,omitempty"`
+	Suspended      string            `json:"suspended,omitempty"`
+	Countries      []CountryApproval `json:"countries"`
+	MACs           []macView         `json:"macs"`
+	Override       *DeviceOverride   `json:"override,omitempty"`
+}
+
+// macView describes a recorded MAC without its tag.
+type macView struct {
+	InterfaceKind string    `json:"interface_kind"`
+	Randomized    string    `json:"randomized"`
+	FirstSeen     time.Time `json:"first_seen"`
+	LastSeen      time.Time `json:"last_seen"`
 }
 
 func (g *Gate) handleListDevices(w http.ResponseWriter, r *http.Request, _ *AdminKey) {
@@ -551,7 +432,17 @@ func (g *Gate) viewDevice(dev *Device, now time.Time) deviceView {
 	v := deviceView{ID: dev.ID, Name: dev.Name, Platform: dev.Platform, Kind: dev.Kind, CreatedAt: dev.CreatedAt,
 		EnrolledFrom: dev.EnrolledFrom, LastAuthAt: dev.LastAuthAt, RevokedAt: dev.RevokedAt,
 		SubjectID: dev.SubjectID, ProfileID: dev.ProfileID, PolicyVersion: g.policyFor(dev).Version,
-		Networks: []NetworkApproval{}, LiveSessions: g.sessions.count(dev.ID, now)}
+		Networks: []NetworkApproval{}, LiveSessions: g.sessions.count(dev.ID, now),
+		KeyFingerprint: keyFingerprint(dev.PublicKey), Suspended: dev.Suspended, Override: dev.Override,
+		Countries: []CountryApproval{}, MACs: []macView{}}
+	for _, c := range dev.Countries {
+		if now.Before(c.ExpiresAt) {
+			v.Countries = append(v.Countries, c)
+		}
+	}
+	for _, m := range dev.MACs {
+		v.MACs = append(v.MACs, macView{InterfaceKind: m.InterfaceKind, Randomized: m.Randomized, FirstSeen: m.FirstSeen, LastSeen: m.LastSeen})
+	}
 	for _, a := range dev.Networks {
 		if now.Before(a.ExpiresAt) {
 			v.Networks = append(v.Networks, a)
@@ -596,6 +487,7 @@ func (g *Gate) handleRevokeDevice(w http.ResponseWriter, r *http.Request, key *A
 	g.sessions.removeDevice(id)
 	g.grants.removeDevice(id)
 	g.streams.cancelDevice(id)
+	g.verifications.removeDevice(id)
 	if err != nil {
 		log.Printf("revoke %s: could not save: %v", id, err)
 		g.audit.write(now, "revoke_not_saved", map[string]any{"device_id": id, "admin_key": key.Name,

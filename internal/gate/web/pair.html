@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Approve a device · Lanternfish Gate</title>
+<link rel="stylesheet" href="/_lanternfish/style.css">
+</head>
+<body>
+<main>
+  <h1>Approve a device</h1>
+  <p id="status" role="status">Enter the code your TV (or other device) shows.</p>
+
+  <form id="lookup">
+    <label for="pcode">Pairing code</label>
+    <input id="pcode" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="9" required placeholder="ABCD-2345">
+    <button type="submit">Continue</button>
+  </form>
+
+  <div id="review" hidden>
+    <p>Only approve if this is your device and you started this:</p>
+    <dl id="facts"></dl>
+    <form id="totp" hidden>
+      <label for="code">Your authenticator app code</label>
+      <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required placeholder="123456">
+      <button type="submit">Approve with code</button>
+    </form>
+    <button type="button" id="passkey" hidden>Approve with a passkey</button>
+  </div>
+</main>
+<script src="/_lanternfish/webauthn.js"></script>
+<script src="/_lanternfish/pair.js"></script>
+</body>
+</html>

@@ -33,6 +33,7 @@ func TestProbationRefusesChanges(t *testing.T) {
 	for name, rec := range map[string]int{
 		"revoke":        h.do("POST", "/_lanternfish/admin/v1/devices/"+enr.DeviceID+"/revoke", nil, auth).Code,
 		"enroll":        h.do("POST", "/_lanternfish/v1/enroll", map[string]string{"ticket": ticket}, nil).Code,
+		"enroll v2":     h.do("POST", "/_lanternfish/v2/enrollment/begin", map[string]string{"ticket": ticket}, nil).Code,
 		"disable owner": h.admin2("POST", "subjects/"+defaultSubjectID+"/disable", nil).Code,
 		"publish policy": h.do("PUT", "/_lanternfish/admin/v2/policy",
 			map[string]any{"expected_version": 1, "policy": RecommendedPolicy()}, auth).Code,
@@ -48,6 +49,10 @@ func TestProbationRefusesChanges(t *testing.T) {
 	tok := tokenOf(t, h.signInFrom(testClientAddr, enr.DeviceID, key))
 	if rec := h.get(testClientAddr, tok); rec.Code != http.StatusOK {
 		t.Fatalf("proxied request during probation: %d", rec.Code)
+	}
+	// So does the v2 sign-in the web client uses.
+	if rec := h.signInWithMAC(enr.DeviceID, key, ""); rec.Code != http.StatusOK {
+		t.Fatalf("v2 sign-in during probation: %d %s", rec.Code, rec.Body)
 	}
 
 	// Once the update is confirmed (marker gone), changes are allowed again.

@@ -50,6 +50,26 @@ type Config struct {
 	// script to Jellyfin's web client (see renewal.go).
 	DisableRenewalInjection bool
 
+	// WebAuthn relying party: the ID (a registrable domain, e.g.
+	// "cindertrace.com" or "flix.cindertrace.com") and the exact HTTPS
+	// origins passkey ceremonies may come from. Deployment settings, never
+	// derived from the Host header. Empty: WebAuthn unavailable.
+	WebAuthnRPID    string
+	WebAuthnRPName  string
+	WebAuthnOrigins []string
+	// WebAuthnMDSPath caches the FIDO metadata (MDS3) blob; needed for
+	// webauthn.attestation "require_trusted".
+	WebAuthnMDSPath string
+
+	// GeoIPPath is a local MaxMind-format country database; GeoIPMaxAge is
+	// when it counts as stale (default 45 days).
+	GeoIPPath   string
+	GeoIPMaxAge time.Duration
+
+	// AuditMaxBytes rotates the audit log at this size, keeping 3 old files
+	// (default 20 MB).
+	AuditMaxBytes int64
+
 	// ProbationPath is the updater's probation marker. While it exists (and
 	// is recent) this is a new version that may still be rolled back, so the
 	// Gate refuses changes to its data; see probation.go.
@@ -124,6 +144,14 @@ type Gate struct {
 	streams       *streamTable
 	grants        *grantTable
 	adminSessions *adminSessionTable
+	verifications *verificationTable
+	setupGrants   *setupGrantTable
+	factorLimiter *failureLimiter // wrong codes per owner
+	enrollLimiter *failureLimiter // enrollment reservations per ticket
+	geo           *geoResolver
+	passkeys      *passkeyRP
+	macKey        []byte
+	macSeen       sync.Map // device ID -> time.Time of its last valid MAC report
 	policies      atomic.Pointer[policySet]
 	policyMu      sync.Mutex // serialises policy publishes with their reload
 	proxy         *httputil.ReverseProxy
@@ -173,7 +201,7 @@ func New(cfg Config) (*Gate, error) {
 	if err != nil {
 		return nil, err
 	}
-	audit, err := openAuditLog(cfg.AuditPath)
+	audit, err := openAuditLog(cfg.AuditPath, cfg.AuditMaxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +219,15 @@ func New(cfg Config) (*Gate, error) {
 		streams:       newStreamTable(),
 		grants:        newGrantTable(),
 		adminSessions: newAdminSessionTable(),
+		verifications: newVerificationTable(),
+		setupGrants:   newSetupGrantTable(),
+		factorLimiter: newFailureLimiter(10, 15*time.Minute, 10000),
+		enrollLimiter: newFailureLimiter(10, time.Hour, 10000),
+		geo:           newGeoResolver(cfg.GeoIPPath, cfg.GeoIPMaxAge),
+		macKey:        macTagKey(cfg.MasterKey),
+	}
+	if g.passkeys, err = newPasskeyRP(cfg); err != nil {
+		return nil, err
 	}
 	if err := store.Migrate(cfg.Now(), cfg.SessionTTL); err != nil {
 		return nil, fmt.Errorf("upgrade data file: %w", err)
@@ -257,20 +294,51 @@ func (g *Gate) routes() http.Handler {
 	mux.HandleFunc("POST /_lanternfish/v1/session", g.handleSession)
 	mux.HandleFunc("POST /_lanternfish/v1/logout", g.handleLogout)
 
-	mux.HandleFunc("POST /_lanternfish/admin/v1/tickets", g.admin(g.handleCreateTicket))
-	mux.HandleFunc("GET /_lanternfish/admin/v1/tickets", g.admin(g.handleListTickets))
-	mux.HandleFunc("DELETE /_lanternfish/admin/v1/tickets/{id}", g.admin(g.handleDeleteTicket))
-	mux.HandleFunc("GET /_lanternfish/admin/v1/devices", g.admin(g.handleListDevices))
-	mux.HandleFunc("POST /_lanternfish/admin/v1/devices/{id}/revoke", g.admin(g.handleRevokeDevice))
+	// v2: same evaluator as v1, plus additional verification.
+	const v2 = "/_lanternfish/v2/"
+	mux.HandleFunc("POST "+v2+"challenge", g.handleChallenge)
+	mux.HandleFunc("POST "+v2+"session", g.handleSessionV2)
+	mux.HandleFunc("POST "+v2+"logout", g.handleLogout)
+	mux.HandleFunc("POST "+v2+"enrollment/begin", g.handleEnrollBegin)
+	mux.HandleFunc("POST "+v2+"enrollment/{id}/finish", g.handleEnrollFinish)
+	mux.HandleFunc("GET "+v2+"verification/{id}", g.handleVerificationStatus)
+	mux.HandleFunc("POST "+v2+"verification/{id}/totp", g.handleVerifyTOTP)
+	mux.HandleFunc("POST "+v2+"verification/{id}/webauthn/options", g.handleVerifyPasskeyOptions)
+	mux.HandleFunc("POST "+v2+"verification/{id}/webauthn/finish", g.handleVerifyPasskeyFinish)
+	mux.HandleFunc("POST "+v2+"verification/{id}/recovery", g.handleVerifyRecovery)
+	mux.HandleFunc("POST "+v2+"verification/{id}/pairing", g.handleVerifyPairing)
+	mux.HandleFunc("POST "+v2+"verification/{id}/complete", g.handleVerifyComplete)
+	mux.HandleFunc("POST "+v2+"pair", g.handlePairLookup)
+	mux.HandleFunc("POST "+v2+"factors/setup/info", g.handleSetupInfo)
+	mux.HandleFunc("POST "+v2+"factors/totp/setup", g.handleSetupTOTP)
+	mux.HandleFunc("POST "+v2+"factors/totp/confirm", g.handleConfirmTOTP)
+	mux.HandleFunc("POST "+v2+"factors/recovery-codes", g.handleNewRecoveryCodes)
+	mux.HandleFunc("POST "+v2+"factors/passkey/options", g.handleSetupPasskeyOptions)
+	mux.HandleFunc("POST "+v2+"factors/passkey/finish", g.handleSetupPasskeyFinish)
+	mux.HandleFunc("POST "+v2+"factors/done", g.handleSetupDone)
+
+	mux.HandleFunc("POST /_lanternfish/admin/v1/tickets", g.admin(scopeTickets, g.handleCreateTicket))
+	mux.HandleFunc("GET /_lanternfish/admin/v1/tickets", g.admin(scopeTickets, g.handleListTickets))
+	mux.HandleFunc("DELETE /_lanternfish/admin/v1/tickets/{id}", g.admin(scopeTickets, g.handleDeleteTicket))
+	mux.HandleFunc("GET /_lanternfish/admin/v1/devices", g.admin(scopeDevices, g.handleListDevices))
+	mux.HandleFunc("POST /_lanternfish/admin/v1/devices/{id}/revoke", g.admin(scopeDevices, g.handleRevokeDevice))
 	g.adminV2Routes(mux)
 	g.adminUIRoutes(mux)
-	mux.HandleFunc("GET /_lanternfish/admin/v2/update", g.admin(g.handleGetUpdate))
-	mux.HandleFunc("POST /_lanternfish/admin/v2/update", g.admin(g.handleRequestUpdate))
+	g.adminFactorRoutes(mux)
+	mux.HandleFunc("GET /_lanternfish/admin/v2/update", g.admin(scopeUpdates, g.handleGetUpdate))
+	mux.HandleFunc("POST /_lanternfish/admin/v2/update", g.admin(scopeUpdates, g.handleRequestUpdate))
 
 	mux.HandleFunc("GET /_lanternfish/{$}", g.serveStatic("index.html"))
 	mux.HandleFunc("GET /_lanternfish/gate-client.js", g.serveStatic("gate-client.js"))
 	mux.HandleFunc("GET /_lanternfish/login.js", g.serveStatic("login.js"))
 	mux.HandleFunc("GET /_lanternfish/style.css", g.serveStatic("style.css"))
+	mux.HandleFunc("GET /_lanternfish/verify", g.serveStatic("verify.html"))
+	mux.HandleFunc("GET /_lanternfish/verify.js", g.serveStatic("verify.js"))
+	mux.HandleFunc("GET /_lanternfish/setup", g.serveStatic("setup.html"))
+	mux.HandleFunc("GET /_lanternfish/setup.js", g.serveStatic("setup.js"))
+	mux.HandleFunc("GET /_lanternfish/pair", g.serveStatic("pair.html"))
+	mux.HandleFunc("GET /_lanternfish/pair.js", g.serveStatic("pair.js"))
+	mux.HandleFunc("GET /_lanternfish/webauthn.js", g.serveStatic("webauthn.js"))
 
 	// Anything else under the prefix is ours, never Jellyfin's.
 	mux.HandleFunc(pathPrefix, func(w http.ResponseWriter, r *http.Request) {
@@ -340,7 +408,7 @@ func (g *Gate) authorizeAndTrack(w http.ResponseWriter, r *http.Request) (*reque
 			return nil, nil, nil
 		}
 		ctx, done := g.streams.track(r.Context(), auth.dev.ID, streamAuth{ip: clientIP(r), network: auth.network,
-			issued: auth.issued, expires: auth.expires, deadline: auth.streamDeadline()}, g.cfg.Now())
+			issued: auth.issued, expires: auth.expires, deadline: auth.streamDeadline(), session: auth.sessionHash}, g.cfg.Now())
 		if g.accessEpoch.Load() == epoch {
 			return auth, ctx, done
 		}

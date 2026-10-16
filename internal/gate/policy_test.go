@@ -232,7 +232,8 @@ func tokenOf(t *testing.T, rec *httptest.ResponseRecorder) string {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("session: %d %s", rec.Code, rec.Body)
 	}
-	return decode[map[string]string](t, rec)["session_token"]
+	tok, _ := decode[map[string]any](t, rec)["session_token"].(string)
+	return tok
 }
 
 func (h *harness) get(remote, token string) *httptest.ResponseRecorder {
@@ -242,7 +243,8 @@ func (h *harness) get(remote, token string) *httptest.ResponseRecorder {
 
 func reasonOf(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
-	return decode[map[string]string](t, rec)["reason"]
+	reason, _ := decode[map[string]any](t, rec)["reason"].(string)
+	return reason
 }
 
 // closedSchedule allows no access now; openUntil allows it until end.
