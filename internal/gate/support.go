@@ -176,6 +176,26 @@ func (t *sessionTable) remove(token string) {
 	}
 }
 
+// trimDevice ends a device's oldest sessions beyond max (0: the table's
+// default), for when a policy lowers the cap.
+func (t *sessionTable) trimDevice(deviceID string, max int) {
+	if max <= 0 {
+		max = t.perDevice
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	list := t.byDevice[deviceID]
+	for len(list) > max {
+		delete(t.byID, list[0])
+		list = list[1:]
+	}
+	if len(list) == 0 {
+		delete(t.byDevice, deviceID)
+	} else {
+		t.byDevice[deviceID] = list
+	}
+}
+
 func (t *sessionTable) removeDevice(deviceID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -298,6 +298,7 @@ func (g *Gate) policiesChanged() {
 		g.audit.write(g.cfg.Now(), "policy_reload_failed", map[string]any{"error": err.Error()})
 		return
 	}
+	g.reconcileLimits()
 	g.grants.clear()
 	g.accessChanged()
 	g.recheckStreams()

@@ -229,3 +229,26 @@ func TestEarlyFailureReportsRestartFailure(t *testing.T) {
 		t.Fatalf("status: %+v", st)
 	}
 }
+
+// N2: a data file too big to back up whole stops the update; it is never
+// backed up truncated.
+func TestOversizeDataFileStopsUpdate(t *testing.T) {
+	priv, keys := testKey(t)
+	srv := fakeGitHub(t, signedRelease(t, priv, "v0.3.0", "0.3.0", true))
+	svc := &fakeService{running: true}
+	in := newInstaller(t, &Source{Repo: "o/r", API: srv.URL, Keys: keys}, "0.2.2", svc)
+	old := maxBackupSize
+	maxBackupSize = 8
+	defer func() { maxBackupSize = old }()
+	os.WriteFile(in.DataPath, []byte(`{"version":2,"padding":"more than eight bytes"}`), 0o600)
+	err := in.Apply(context.Background(), "0.3.0", "test", ApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "complete backup") {
+		t.Fatalf("update with an oversize data file: %v", err)
+	}
+	if !strings.Contains(read(t, in.BinPath), "echo 0.2.2") || !svc.running {
+		t.Fatal("the installation was changed, or the Gate left stopped")
+	}
+	if backups, _ := filepath.Glob(filepath.Join(in.BackupDir, "gate.json.*")); len(backups) != 0 {
+		t.Fatalf("truncated backup left: %v", backups)
+	}
+}

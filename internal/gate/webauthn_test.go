@@ -24,6 +24,10 @@ type softAuthenticator struct {
 	origin  string
 	counter uint32
 	flags   byte // added to UP|UV, e.g. 0x08 backup eligible
+
+	aaguid []byte // 16 bytes; nil: all zero
+	// attest makes the attestation statement for create; nil: "none".
+	attest func(authData, clientDataHash []byte) (format string, stmt map[string]any)
 }
 
 const (
@@ -54,7 +58,11 @@ func (a *softAuthenticator) authData(attested bool) []byte {
 	out = append(out, flags)
 	out = binary.BigEndian.AppendUint32(out, a.counter)
 	if attested {
-		out = append(out, make([]byte, 16)...) // AAGUID
+		if a.aaguid != nil {
+			out = append(out, a.aaguid...)
+		} else {
+			out = append(out, make([]byte, 16)...) // AAGUID
+		}
 		out = binary.BigEndian.AppendUint16(out, uint16(len(a.id)))
 		out = append(out, a.id...)
 		x, y := make([]byte, 32), make([]byte, 32)
@@ -81,9 +89,16 @@ func challengeOf(t *testing.T, body []byte) string {
 }
 
 func (a *softAuthenticator) create(challenge string) map[string]any {
-	att, _ := cbor.Marshal(map[string]any{"fmt": "none", "attStmt": map[string]any{}, "authData": a.authData(true)})
+	ad := a.authData(true)
+	cd := a.clientData("webauthn.create", challenge)
+	format, stmt := "none", map[string]any{}
+	if a.attest != nil {
+		h := sha256.Sum256(cd)
+		format, stmt = a.attest(ad, h[:])
+	}
+	att, _ := cbor.Marshal(map[string]any{"fmt": format, "attStmt": stmt, "authData": ad})
 	return map[string]any{"id": b64u.EncodeToString(a.id), "rawId": b64u.EncodeToString(a.id), "type": "public-key",
-		"response": map[string]any{"clientDataJSON": b64u.EncodeToString(a.clientData("webauthn.create", challenge)),
+		"response": map[string]any{"clientDataJSON": b64u.EncodeToString(cd),
 			"attestationObject": b64u.EncodeToString(att)}}
 }
 

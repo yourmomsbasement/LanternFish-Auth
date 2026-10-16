@@ -10,6 +10,22 @@ import "net/netip"
 // SECURITY: the address is the TCP peer the Gate sees. Forwarded-for headers
 // are never consulted: anyone could send them. Behind a TCP passthrough proxy
 // every client shares the proxy's address; see docs/PROTOCOL.md.
+// unknownLocationSource is what an approval for an unknown location (an
+// address GeoIP can't place) is bound to: the network key when IP binding is
+// on, else the client address itself.
+//
+// SECURITY: with IP binding off, networkKey is "" for every address, so an
+// approval bound to it would hold for every unknown address at once:
+// verifying from one address nobody can place would approve all of them.
+func unknownLocationSource(ip string, p IPPolicy) string {
+	if p.Enabled {
+		return networkKey(ip, p)
+	}
+	exact := p
+	exact.Enabled, exact.Match = true, "exact"
+	return networkKey(ip, exact)
+}
+
 func networkKey(ip string, p IPPolicy) string {
 	if !p.Enabled {
 		return ""

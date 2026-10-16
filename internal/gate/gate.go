@@ -265,6 +265,7 @@ func New(cfg Config) (*Gate, error) {
 		},
 	}
 	g.handler = g.routes()
+	g.repairStoredState()
 	g.startProbation()
 	return g, nil
 }
