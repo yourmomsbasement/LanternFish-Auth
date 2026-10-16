@@ -44,7 +44,10 @@ jobs:
           name="lanternfish-gate_${version}_${GOOS}_${GOARCH}"
           ext=""; [ "$GOOS" = windows ] && ext=".exe"
           mkdir -p "dist/$name/docs"
-          go build -trimpath -ldflags "-s -w -X main.version=$version" \
+          # Keep symbols in the shipped binary: govulncheck falls back to all
+          # vulnerable packages in each module when symbols are stripped,
+          # including packages we do not import (such as x/crypto/openpgp).
+          go build -trimpath -ldflags "-X main.version=$version" \
             -o "dist/$name/lanternfish-gate$ext" ./cmd/lanternfish-gate
           # The runtime is compiled into the binary, so check which one it got:
           # exactly the Go release go.mod pins.
