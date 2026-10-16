@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -132,6 +133,8 @@ const maxPolicyHistory = 500
 // Readers never wait for disk I/O: writers are serialised by wmu, and mu is
 // held only to take a copy or swap in the new state.
 type Store struct {
+	readOnly atomic.Bool // refuse every Update (see Gate probation)
+
 	path string
 	wmu  sync.Mutex   // serialises writers
 	mu   sync.RWMutex // guards data
@@ -277,6 +280,9 @@ func (d *storeData) policyRecord(version int) (PolicyRecord, bool) {
 	return PolicyRecord{}, false
 }
 
+// ErrProbation is returned by Update while a new version is on probation.
+var ErrProbation = errors.New("the Gate is finishing an update; its data can't change until the update is confirmed")
+
 // View runs fn with the store locked for reading. fn must not modify d or
 // keep pointers into it.
 func (s *Store) View(fn func(d *storeData)) {
@@ -288,6 +294,9 @@ func (s *Store) View(fn func(d *storeData)) {
 // Update runs fn on a copy of the data and, if fn succeeds, saves the copy
 // and makes it current. If fn or the save fails, nothing changes.
 func (s *Store) Update(fn func(d *storeData) error) error {
+	if s.readOnly.Load() {
+		return ErrProbation
+	}
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	s.mu.RLock()

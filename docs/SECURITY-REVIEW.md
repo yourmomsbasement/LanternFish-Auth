@@ -61,6 +61,36 @@ network is approved by device-key proof (not TOTP or WebAuthn, which aren't
 implemented and are rejected in policies); IP binding uses the TCP peer
 address; and the dashboard shares an origin with Jellyfin.
 
+## v0.2.2 review: the updater
+
+A review of v0.2.2 found that R1–R7 still reproduced there, because their
+fixes merged after that tag (in yourmomsbasement/LanternFish-Auth#12). It
+also found three updater problems, fixed here with regression tests that
+fail when their fix is taken out:
+
+| # | Priority | Issue | Fix |
+|---|---|---|---|
+| U1 | Medium | Updates from the dashboard, the timer and the command line could overlap. Each compared against the version compiled into its own process, so a delayed update could install an older release over a newer one, without allowing downgrades. | One OS lock (`/var/lib/lanternfish-update/install.lock`, root-only) covers the whole installation. Under it, the downgrade check asks the installed binary its version. Each attempt stages its binary under its own name. |
+| U2 | Medium | A rollback restores the whole data file, so a revocation, a used ticket or a policy change made while the new version was being health-checked was undone. | The updater marks the new version as on probation (`/var/lib/lanternfish-update/probation`). Until it is confirmed, the Gate refuses every change to its data with `503 update_in_progress`, and the store refuses writes as a backstop. Signing in and proxying keep working. A stale marker (over 10 minutes old) is ignored. |
+| U3 | Medium | Rollback ignored a failure to stop the new Gate, then overwrote its binary and data and reported `rolled_back`. | Stopping is confirmed by taking the Gate's own data file lock, which a running Gate holds. If that fails, nothing is overwritten and the status is `needs_manual_recovery`. A rollback is reported only once the restored version reports the right version and passes the health check. A failed restart after an early error is reported too. |
+
+These fixes protect updates run by a fixed updater. The updater is the
+installed binary, so the update *to* the first fixed release still runs
+v0.2.2's updater. Run that one update by hand, with the timer and the
+dashboard trigger paused so nothing overlaps it (as root on the Gate):
+
+```sh
+systemctl stop lanternfish-gate-update-auto.timer lanternfish-gate-update.path
+lanternfish-gate update apply
+systemctl start lanternfish-gate-update-auto.timer lanternfish-gate-update.path
+```
+
+Not changed: the maintainer's signing script checks the archives against the
+manifest from the same GitHub release. That shows they are consistent, not
+that they came from the intended commit. If the release were tampered with
+before signing, the signature would vouch for it. Check that the release's
+workflow run built the expected commit before signing.
+
 ## Reviewed, no change needed
 
 * **Credential handling:** tickets, admin keys and session tokens are 256-bit

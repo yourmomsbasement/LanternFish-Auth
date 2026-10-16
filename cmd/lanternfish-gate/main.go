@@ -174,6 +174,7 @@ func serve() error {
 
 	cfg.Version = version
 	cfg.Updates = gateUpdates()
+	cfg.ProbationPath = probationPath()
 	if p := cfg.Updates; p != nil {
 		switch p.AutoPolicy {
 		case "off", "patch", "minor", "all":
