@@ -196,12 +196,14 @@ const (
 	scopeFactorRecovery = "factor-recovery"
 	scopeAudit          = "audit"
 	scopeUpdates        = "updates"
+	scopeSettings       = "settings"
 )
 
 var allScopes = []string{scopeTickets, scopeDevices, scopePolicyRead, scopePolicyWrite, scopeOwners,
-	scopeFactorRecovery, scopeAudit, scopeUpdates}
+	scopeFactorRecovery, scopeAudit, scopeUpdates, scopeSettings}
 
-var sensitiveScopes = map[string]bool{scopePolicyWrite: true, scopeOwners: true, scopeFactorRecovery: true, scopeUpdates: true}
+var sensitiveScopes = map[string]bool{scopePolicyWrite: true, scopeOwners: true, scopeFactorRecovery: true, scopeUpdates: true,
+	scopeSettings: true}
 
 // recentVerification is how long a dashboard re-verification lasts.
 const recentVerification = 5 * time.Minute
@@ -411,6 +413,8 @@ type deviceView struct {
 	Networks      []NetworkApproval `json:"networks"`
 	LiveSessions  int               `json:"live_sessions"`
 
+	ParentID       string            `json:"parent_id,omitempty"`
+	LinkedHost     string            `json:"linked_host,omitempty"`
 	KeyFingerprint string            `json:"key_fingerprint,omitempty"`
 	Suspended      string            `json:"suspended,omitempty"`
 	Countries      []CountryApproval `json:"countries"`
@@ -443,7 +447,7 @@ func (g *Gate) viewDevice(dev *Device, now time.Time) deviceView {
 		EnrolledFrom: dev.EnrolledFrom, LastAuthAt: dev.LastAuthAt, RevokedAt: dev.RevokedAt,
 		SubjectID: dev.SubjectID, ProfileID: dev.ProfileID, PolicyVersion: g.policyFor(dev).Version,
 		Networks: []NetworkApproval{}, LiveSessions: g.sessions.count(dev.ID, now),
-		KeyFingerprint: keyFingerprint(dev.PublicKey), Suspended: dev.Suspended, Override: dev.Override,
+		KeyFingerprint: keyFingerprint(dev.PublicKey), ParentID: dev.ParentID, LinkedHost: dev.LinkedHost, Suspended: dev.Suspended, Override: dev.Override,
 		Countries: []CountryApproval{}, MACs: []macView{}}
 	for _, c := range dev.Countries {
 		if now.Before(c.ExpiresAt) {
@@ -494,10 +498,7 @@ func (g *Gate) handleRevokeDevice(w http.ResponseWriter, r *http.Request, key *A
 		writeError(w, http.StatusNotFound, "no such device")
 		return
 	}
-	g.sessions.removeDevice(id)
-	g.grants.removeDevice(id)
-	g.streams.cancelDevice(id)
-	g.verifications.removeDevice(id)
+	g.endAccess(id) // and the devices linked to it
 	if err != nil {
 		log.Printf("revoke %s: could not save: %v", id, err)
 		g.audit.write(now, "revoke_not_saved", map[string]any{"device_id": id, "admin_key": key.Name,

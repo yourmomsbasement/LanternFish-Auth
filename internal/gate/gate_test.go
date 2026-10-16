@@ -531,6 +531,9 @@ func TestAdminAPIOnlyFromAllowedNetworks(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.g.cfg.AdminAllow = nets
+	if err := h.g.loadRouting(); err != nil { // as at start-up
+		t.Fatal(err)
+	}
 	if rec := h.doFrom("203.0.113.7:4000", "GET", "/_lanternfish/admin/v1/devices", nil, auth); rec.Code != http.StatusOK {
 		t.Fatalf("explicitly allowed host: %d", rec.Code)
 	}

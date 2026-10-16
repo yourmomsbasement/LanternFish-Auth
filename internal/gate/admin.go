@@ -2,6 +2,7 @@ package gate
 
 import (
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -172,4 +173,33 @@ func (a *Admin) UpstreamPublicKey() (string, error) {
 		return "", err
 	}
 	return encodeB64(pub), nil
+}
+
+// SettingsJSON returns the dashboard's network settings ("null": none).
+func (a *Admin) SettingsJSON() ([]byte, error) {
+	var out []byte
+	var err error
+	a.store.View(func(d *storeData) { out, err = json.MarshalIndent(d.Settings, "", "  ") })
+	return out, err
+}
+
+// ResetSettings is the break-glass for network settings that lock the
+// administrator out or stop the Gate starting: back to gate.env's values.
+func (a *Admin) ResetSettings(adminOnly bool) error {
+	err := a.store.Update(func(d *storeData) error {
+		if d.Settings == nil {
+			return nil
+		}
+		if adminOnly {
+			d.Settings.AdminAllow = nil
+			d.Settings.Version++
+		} else {
+			d.Settings = nil
+		}
+		return nil
+	})
+	if err == nil {
+		a.audit.write(a.cfg.Now(), "settings_reset_offline", map[string]any{"admin_only": adminOnly})
+	}
+	return err
 }

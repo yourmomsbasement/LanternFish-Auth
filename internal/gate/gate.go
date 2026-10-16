@@ -23,6 +23,8 @@ import (
 
 // Config configures a Gate. Zero durations and limits take the defaults.
 type Config struct {
+	// Upstream is Jellyfin (LANTERNFISH_UPSTREAM); the dashboard can change
+	// it, see settings.go.
 	Upstream     *url.URL
 	DataPath     string
 	AuditPath    string
@@ -74,6 +76,11 @@ type Config struct {
 	// is recent) this is a new version that may still be rolled back, so the
 	// Gate refuses changes to its data; see probation.go.
 	ProbationPath string
+
+	// Listen and TLSCertFile are shown on the dashboard (changing them
+	// needs gate.env and a restart).
+	Listen      string
+	TLSCertFile string
 
 	// Now overrides the clock in tests.
 	Now func() time.Time
@@ -146,6 +153,7 @@ type Gate struct {
 	adminSessions *adminSessionTable
 	verifications *verificationTable
 	setupGrants   *setupGrantTable
+	links         linkTable
 	factorLimiter *failureLimiter // wrong codes per owner
 	enrollLimiter *failureLimiter // enrollment reservations per ticket
 	geo           *geoResolver
@@ -167,6 +175,9 @@ type Gate struct {
 	// disable, policy publish, profile change, network approval change).
 	// See accessChanged and serveProxy.
 	accessEpoch atomic.Uint64
+
+	// routing is the effective network settings (settings.go).
+	routing atomic.Pointer[routing]
 
 	handler http.Handler
 }
@@ -235,19 +246,29 @@ func New(cfg Config) (*Gate, error) {
 	if err := g.reloadPolicies(); err != nil {
 		return nil, err
 	}
+	if err := g.loadRouting(); err != nil {
+		return nil, err
+	}
 	g.proxy = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(cfg.Upstream)
+			a, _ := pr.In.Context().Value(proxyAuthKey{}).(proxyAuth)
+			pr.SetURL(a.target)
 			pr.SetXForwarded()
+			if a.app != nil && a.app.PreserveHost {
+				pr.Out.Host = pr.In.Host
+			}
 			// SECURITY: set the identity headers on the outbound request here,
 			// after ReverseProxy has removed hop-by-hop headers. Set on the
 			// inbound request, a client could have them stripped by naming them
-			// in its own Connection header.
-			a, _ := pr.In.Context().Value(proxyAuthKey{}).(proxyAuth)
-			pr.Out.Header.Set(deviceHeader, a.deviceID)
-			pr.Out.Header.Set(authKindHeader, a.how)
+			// in its own Connection header. (Lanternfish headers from the
+			// client were removed in serveProxy, so an app without identity
+			// headers sees none.)
 			g.prepareRenewal(pr.Out)
-			g.signUpstream(pr.Out)
+			if a.app == nil || a.app.IdentityHeaders {
+				pr.Out.Header.Set(deviceHeader, a.deviceID)
+				pr.Out.Header.Set(authKindHeader, a.how)
+				g.signUpstream(pr.Out)
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			// The Gate sets HSTS on every response itself; drop Jellyfin's
@@ -317,6 +338,15 @@ func (g *Gate) routes() http.Handler {
 	mux.HandleFunc("POST "+v2+"factors/passkey/options", g.handleSetupPasskeyOptions)
 	mux.HandleFunc("POST "+v2+"factors/passkey/finish", g.handleSetupPasskeyFinish)
 	mux.HandleFunc("POST "+v2+"factors/done", g.handleSetupDone)
+	mux.HandleFunc("GET "+v2+"site", g.handleSite)
+	mux.HandleFunc("POST "+v2+"link/code", g.handleLinkCode)
+	mux.HandleFunc("POST "+v2+"link/redeem", g.handleLinkRedeem)
+	mux.HandleFunc("GET /_lanternfish/admin/v2/settings", g.admin(scopeSettings, g.handleGetSettings))
+	mux.HandleFunc("PUT /_lanternfish/admin/v2/settings", g.admin(scopeSettings, g.handlePutSettings))
+	mux.HandleFunc("POST /_lanternfish/admin/v2/settings/test-upstream", g.admin(scopeSettings, g.handleTestUpstream))
+	mux.HandleFunc("GET /_lanternfish/admin/v2/firewall", g.admin(scopeSettings, g.handleGetFirewall))
+	mux.HandleFunc("PUT /_lanternfish/admin/v2/firewall", g.admin(scopeSettings, g.handlePutFirewall))
+	mux.HandleFunc("POST /_lanternfish/admin/v2/firewall/script", g.admin(scopeSettings, g.handleFirewallScript))
 
 	mux.HandleFunc("POST /_lanternfish/admin/v1/tickets", g.admin(scopeTickets, g.handleCreateTicket))
 	mux.HandleFunc("GET /_lanternfish/admin/v1/tickets", g.admin(scopeTickets, g.handleListTickets))
@@ -374,10 +404,22 @@ func (g *Gate) activeDevice(id string) *Device {
 	var out *Device
 	g.store.View(func(d *storeData) {
 		if dev, ok := d.Devices[id]; ok && dev.Active() {
+			// SECURITY: a linked device works only while its parent does.
+			if dev.ParentID != "" {
+				p := d.Devices[dev.ParentID]
+				if !p.Active() || p.Suspended != "" {
+					return
+				}
+			}
 			c := *dev
 			out = &c
 		}
 	})
+	if out != nil && out.ParentID != "" {
+		if _, revoked := g.unsavedRevocations.Load(out.ParentID); revoked {
+			return nil
+		}
+	}
 	return out
 }
 
@@ -401,37 +443,51 @@ func (g *Gate) accessChanged() { g.accessEpoch.Add(1) }
 // the change may have missed this request, and it is authorized again under
 // the new state. Either the change sees the registered stream, or this
 // request sees the change. On failure it writes the response and returns nil.
-func (g *Gate) authorizeAndTrack(w http.ResponseWriter, r *http.Request) (*requestAuth, context.Context, func()) {
+func (g *Gate) authorizeAndTrack(w http.ResponseWriter, r *http.Request) (*requestAuth, *appRoute, context.Context, func()) {
 	for attempt := 0; attempt < 3; attempt++ {
 		epoch := g.accessEpoch.Load()
 		auth := g.authorizeRequest(w, r)
 		if auth == nil {
-			return nil, nil, nil
+			return nil, nil, nil, nil
+		}
+		// The application is looked up after the epoch is read, so a
+		// settings change that lands meanwhile is seen here or closes this.
+		app := g.appFor(r)
+		if !g.appAllows(w, r, auth.dev, app) {
+			return nil, nil, nil, nil
+		}
+		appID := ""
+		if app != nil {
+			appID = app.ID
 		}
 		ctx, done := g.streams.track(r.Context(), auth.dev.ID, streamAuth{ip: clientIP(r), network: auth.network,
-			issued: auth.issued, expires: auth.expires, deadline: auth.streamDeadline(), session: auth.sessionHash}, g.cfg.Now())
+			issued: auth.issued, expires: auth.expires, deadline: auth.streamDeadline(), session: auth.sessionHash,
+			app: appID}, g.cfg.Now())
 		if g.accessEpoch.Load() == epoch {
-			return auth, ctx, done
+			return auth, app, ctx, done
 		}
 		done()
 	}
 	// Access is changing faster than this request can be checked.
 	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "temporarily_unavailable", "reason": "access_changing"})
-	return nil, nil, nil
+	return nil, nil, nil, nil
 }
 
 func (g *Gate) serveProxy(w http.ResponseWriter, r *http.Request) {
-	auth, ctx, done := g.authorizeAndTrack(w, r)
+	auth, app, ctx, done := g.authorizeAndTrack(w, r)
 	if auth == nil {
 		return
 	}
 	defer done()
 	dev, how := auth.dev, auth.how
 
-	// Gate credentials stay at the Gate; Jellyfin only learns who it is.
+	// Gate credentials stay at the Gate; the upstream only learns who it is.
 	r.Header.Del(sessionHeader)
 	r.Header.Del(deviceHeader)
 	r.Header.Del(authKindHeader)
+	r.Header.Del(gateTimestampHeader)
+	r.Header.Del(gateNonceHeader)
+	r.Header.Del(gateSignatureHeader)
 	if cookies := r.Cookies(); len(cookies) > 0 {
 		r.Header.Del("Cookie")
 		for _, c := range cookies {
@@ -440,12 +496,20 @@ func (g *Gate) serveProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	ctx = context.WithValue(ctx, proxyAuthKey{}, proxyAuth{deviceID: dev.ID, how: how})
+	target := g.routing.Load().jellyfin
+	if app != nil {
+		target = app.target
+	}
+	ctx = context.WithValue(ctx, proxyAuthKey{}, proxyAuth{deviceID: dev.ID, how: how, app: app, target: target})
 	g.proxy.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // proxyAuth carries who a request authenticated as from serveProxy to Rewrite.
-type proxyAuth struct{ deviceID, how string }
+type proxyAuth struct {
+	deviceID, how string
+	app           *appRoute // nil: Jellyfin
+	target        *url.URL
+}
 
 type proxyAuthKey struct{}
 

@@ -49,7 +49,7 @@ func (g *Gate) adminAllowed(ip string) bool {
 		return false
 	}
 	a = a.Unmap()
-	for _, p := range g.cfg.AdminAllow {
+	for _, p := range g.routing.Load().adminAllow {
 		if p.Contains(a) {
 			return true
 		}

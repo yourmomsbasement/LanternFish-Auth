@@ -206,6 +206,7 @@
 
   tabs.devices = function () {
     return api("GET", V1 + "devices").then(function (data) {
+      data.devices.forEach(function (d) { deviceNames[d.id] = d.name; });
       var showRevoked = h("input", { type: "checkbox", id: "showrev" });
       var table = h("table", null, h("thead", null, h("tr", null,
         ["Device", "Owner", "Policy", "Networks", "Sessions", "Last sign-in", ""].map(function (t) { return h("th", { text: t }); }))));
@@ -242,7 +243,8 @@
           var detail = h("tr", { hidden: true }, h("td", { colspan: "7" }));
           var badges = h("div", { class: "chips" },
             d.suspended ? h("span", { class: "chip bad", text: "suspended: " + d.suspended.replace(/_/g, " ") }) : null,
-            d.override ? h("span", { class: "chip", text: "own policy" + (d.override.expires_at ? " until " + when(d.override.expires_at) : "") }) : null);
+            d.override ? h("span", { class: "chip", text: "own policy" + (d.override.expires_at ? " until " + when(d.override.expires_at) : "") }) : null,
+            d.parent_id ? h("span", { class: "chip", text: "linked for " + d.linked_host }) : null);
           add(body, h("tr", null,
             h("td", null, h("strong", { text: d.name || "(unnamed)" }), h("div", { class: "muted small" },
               d.platform + " · ", h("span", { class: "mono", text: d.id }), " · enrolled " + when(d.created_at) + " from " + d.enrolled_from),
@@ -268,6 +270,9 @@
     });
   };
 
+  var deviceNames = {};
+  function deviceName(id) { return deviceNames[id] || id; }
+
   // deviceDetail: key, location, MAC evidence, own policy and recovery actions.
   function deviceDetail(d) {
     var path = V2 + "devices/" + encodeURIComponent(d.id);
@@ -275,6 +280,8 @@
     function kv(k, v) { return [h("dt", { text: k }), h("dd", null, v)]; }
     add(box, h("dl", null,
       kv("Key fingerprint", h("span", { class: "mono", text: d.key_fingerprint || "—" })),
+      d.parent_id ? kv("Linked to", h("span", null, deviceName(d.parent_id) + " for " + d.linked_host +
+        " (follows that device: revoking it revokes this too)")) : null,
       kv("Countries", d.countries.length ? d.countries.map(function (c) {
         return (c.country || "unknown (" + c.network + ")") + " via " + c.method + ", until " + when(c.expires_at);
       }).join("; ") : "none recorded"),
@@ -871,6 +878,291 @@
     }, fail);
     return box;
   }
+
+  // ---- network: Jellyfin, admin networks, applications ----
+
+  tabs.network = function () {
+    return api("GET", V2 + "settings").then(function (data) {
+      var s = JSON.parse(JSON.stringify(data.settings));
+      s.apps = s.apps || [];
+      s.admin_allow = s.admin_allow || [];
+      var env = data.environment, live = data.effective;
+
+      function input(obj, key, attrs) {
+        var el = h("input", Object.assign({ value: obj[key] || "" }, attrs || {}));
+        el.addEventListener("input", function () { obj[key] = el.value.trim(); });
+        return el;
+      }
+      function check(obj, key, label, hint) {
+        var el = h("input", { type: "checkbox", checked: obj[key] });
+        el.addEventListener("change", function () { obj[key] = el.checked; });
+        return h("label", { title: hint || "" }, el, " " + label);
+      }
+      function field(label, el, hint) {
+        return h("div", { class: "field" }, h("label", { text: label }), el, hint ? h("span", { class: "muted small", text: hint }) : null);
+      }
+      function testButton(getURL) {
+        var out = h("span", { class: "small" });
+        return h("span", null, h("button", { type: "button", class: "secondary", text: "Test", onclick: function () {
+          var u = getURL();
+          if (!u) { out.textContent = "enter an address"; out.className = "small bad"; return; }
+          out.textContent = "…"; out.className = "small muted";
+          api("POST", V2 + "settings/test-upstream", { url: u }).then(function (r) {
+            out.textContent = r.reachable ? " answered HTTP " + r.status + " in " + r.ms + " ms" + (r.server ? " (" + r.server + ")" : "")
+              : " not reachable: " + r.error;
+            out.className = "small " + (r.reachable ? "ok" : "bad");
+          }, fail);
+        } }), out);
+      }
+
+      var upstream = input(s, "upstream", { placeholder: env.upstream, size: "34" });
+      var primary = input(s, "primary_host", { placeholder: env.primary_host || "flix.example.com", size: "28" });
+      var admins = h("textarea", { rows: "4", class: "short", spellcheck: "false", placeholder: env.admin_allow.join("\n") });
+      admins.value = s.admin_allow.join("\n");
+      admins.addEventListener("input", function () {
+        s.admin_allow = admins.value.split(/[\s,]+/).filter(Boolean);
+      });
+      var tls = data.tls;
+
+      var gateCard = h("div", { class: "card" }, h("h2", { text: "Jellyfin and the Gate" }),
+        h("p", { class: "muted small", text: "Empty fields use gate.env. Changes apply to the next request; no restart." }),
+        h("div", { class: "row" },
+          field("Jellyfin address", upstream, "in use: " + live.upstream),
+          testButton(function () { return s.upstream || env.upstream; })),
+        h("div", { class: "row" },
+          field("Sign-in host (Jellyfin's public name)", primary, live.primary_host ? "in use: " + live.primary_host
+            : "not set: applications can't link browsers")),
+        h("div", { class: "row" },
+          field("Admin networks (one per line: address or CIDR)", admins,
+            "in use: " + live.admin_allow.join(", ") + ". Your address " + live.client_address + " must stay in the list.")),
+        h("h3", { text: "Set in gate.env (restart to change)" }),
+        h("dl", null,
+          h("dt", { text: "Listening on" }), h("dd", { class: "mono", text: env.listen || "—" }),
+          h("dt", { text: "TLS certificate" }), h("dd", null, tls.available
+            ? (tls.names || []).join(", ") + " — " + (tls.issuer || "") + ", expires " + when(tls.not_after)
+            : h("span", { class: "muted", text: tls.error || "unknown" }))));
+
+      var appBox = h("div");
+      function renderApps() {
+        clear(appBox);
+        if (!s.apps.length) add(appBox, h("p", { class: "muted", text: "No applications yet. Only Jellyfin is behind the Gate." }));
+        s.apps.forEach(function (a, i) {
+          a.hosts = a.hosts || [];
+          a.owners = a.owners || [];
+          var hosts = h("input", { value: a.hosts.join(", "), placeholder: "sonarr.example.com", size: "34" });
+          hosts.addEventListener("input", function () { a.hosts = hosts.value.split(/[\s,]+/).filter(Boolean); });
+          var owners = h("span", { class: "days" }, cache.subjects.map(function (o) {
+            var c = h("input", { type: "checkbox", checked: a.owners.indexOf(o.id) >= 0 });
+            c.addEventListener("change", function () {
+              a.owners = a.owners.filter(function (x) { return x !== o.id; });
+              if (c.checked) a.owners.push(o.id);
+            });
+            return h("label", null, c, o.name);
+          }));
+          add(appBox, h("div", { class: "card app" },
+            h("div", { class: "row" },
+              field("Name", input(a, "name", { placeholder: "Sonarr", maxlength: "64" })),
+              check(a, "enabled", "Enabled"),
+              h("button", { type: "button", class: "danger", text: "Remove", onclick: function () {
+                if (!confirm("Remove " + (a.name || "this application") + "? Its open connections close when you save.")) return;
+                s.apps.splice(i, 1); renderApps();
+              } })),
+            h("div", { class: "row" },
+              field("Public hostnames", hosts, "comma-separated; each needs DNS pointing at the Gate and a place in its TLS certificate"),
+              field("Address behind the Gate", input(a, "upstream", { placeholder: "http://10.20.0.5:8989", size: "30" })),
+              testButton(function () { return a.upstream; })),
+            h("div", { class: "row" }, field("Owners allowed (none ticked: every owner)", owners)),
+            h("div", { class: "row" },
+              check(a, "preserve_host", "Send the public hostname", "What most apps behind a reverse proxy expect"),
+              check(a, "inject_renewal", "Keep browser sessions alive", "Adds the session-renewal script to the app's pages"),
+              check(a, "identity_headers", "Send Lanternfish identity headers", "The device ID and a Gate signature, as Jellyfin gets"))));
+        });
+      }
+      renderApps();
+
+      function save() {
+        var body = JSON.parse(JSON.stringify(s));
+        api("PUT", V2 + "settings", body).then(function (r) {
+          flash("Saved (version " + r.version + ").");
+          reload();
+        }, function (err) {
+          if (err.status === 409) flash("The settings were changed meanwhile. Reload to see them.", true);
+          else fail(err);
+        });
+      }
+
+      return [
+        data.warnings.length ? h("div", { class: "card" }, data.warnings.map(function (w) { return h("p", { class: "bad", text: "⚠ " + w }); })) : null,
+        gateCard,
+        h("div", { class: "card" }, h("h2", { text: "Applications behind the Gate" }),
+          h("p", { class: "muted small", text: "Each application gets its own hostname. Browsers sign in on the sign-in host and are linked to the application the first time; native apps use their session as usual. Devices, owners and policies are the same as Jellyfin's." }),
+          appBox,
+          h("button", { type: "button", class: "secondary", text: "Add application", onclick: function () {
+            s.apps.push({ name: "", enabled: true, hosts: [], upstream: "", owners: [], preserve_host: true, inject_renewal: true, identity_headers: false });
+            renderApps();
+          } })),
+        h("div", { class: "row" }, h("button", { type: "button", text: "Save network settings", onclick: save }),
+          s.version ? h("span", { class: "muted small", text: "Version " + s.version + ", saved " + when(s.updated_at) + " by " + s.updated_by }) : null)
+      ];
+    });
+  };
+
+  // ---- firewall: Proxmox rules for the Gate and what's behind it ----
+
+  tabs.firewall = function () {
+    return api("GET", V2 + "firewall").then(function (data) {
+      var p = JSON.parse(JSON.stringify(data.plan || data.suggested));
+      var fresh = !data.plan;
+      p.guests = p.guests || [];
+      p.gate.ssh_from = p.gate.ssh_from || [];
+      var out = h("div"), warnBox = h("div");
+
+      function num(obj, key, attrs) {
+        var el = h("input", Object.assign({ type: "number", value: obj[key] || "" }, attrs || {}));
+        el.addEventListener("input", function () { obj[key] = Number(el.value) || 0; });
+        return el;
+      }
+      function text(obj, key, attrs) {
+        var el = h("input", Object.assign({ value: obj[key] || "" }, attrs || {}));
+        el.addEventListener("input", function () { obj[key] = el.value.trim(); });
+        return el;
+      }
+      function list(obj, key, attrs, numbers) {
+        var el = h("input", Object.assign({ value: (obj[key] || []).join(", ") }, attrs || {}));
+        el.addEventListener("input", function () {
+          var v = el.value.split(/[\s,]+/).filter(Boolean);
+          obj[key] = numbers ? v.map(Number) : v;
+        });
+        return el;
+      }
+      function check(obj, key, label, hint) {
+        var el = h("input", { type: "checkbox", checked: obj[key] });
+        el.addEventListener("change", function () { obj[key] = el.checked; });
+        return h("label", { title: hint || "" }, el, " " + label);
+      }
+      function field(label, el, hint) {
+        return h("div", { class: "field" }, h("label", { text: label }), el, hint ? h("span", { class: "muted small", text: hint }) : null);
+      }
+      function showWarnings(ws) {
+        clear(warnBox);
+        (ws || []).forEach(function (w) { add(warnBox, h("p", { class: "bad small", text: "⚠ " + w })); });
+      }
+      showWarnings(data.warnings);
+
+      var g = p.gate;
+      var gateCard = h("div", { class: "card" }, h("h2", { text: "The Gate's container" }),
+        h("div", { class: "row" },
+          field("Container ID", num(g, "id", { min: 100, placeholder: "200" })),
+          field("LAN interface", text(g, "lan_nic", { placeholder: "net0", size: "6" }), "where HTTPS arrives"),
+          field("Internal address", text(g, "internal_ip", { placeholder: "10.20.0.2", size: "14" }), "the Gate's IP on the internal network"),
+          field("Public HTTPS port", num(g, "public_port", { min: 1, max: 65535 }))),
+        h("div", { class: "row" },
+          field("Internal network", text(p, "internal_net", { placeholder: "10.20.0.0/24", size: "16" })),
+          field("SSH allowed from", list(g, "ssh_from", { placeholder: "192.168.1.10", size: "30" }), "addresses or networks; empty: no SSH"),
+          check(g, "allow_ping", "Answer ping")));
+
+      var guestBox = h("div");
+      function renderGuests() {
+        clear(guestBox);
+        if (!p.guests.length) add(guestBox, h("p", { class: "muted", text: "No guests yet." }));
+        p.guests.forEach(function (x, i) {
+          x.talks_to = x.talks_to || [];
+          x.sources = x.sources || [];
+          var kind = h("select", null, h("option", { value: "ct", text: "container (CT)" }), h("option", { value: "vm", text: "virtual machine" }));
+          kind.value = x.kind || "ct";
+          kind.addEventListener("change", function () { x.kind = kind.value; });
+          var name = text(x, "name", { placeholder: "Sonarr", maxlength: "40", size: "14" });
+          var prevName = x.name;
+          name.addEventListener("change", function () { // keep "talks to" pointing at the renamed guest
+            p.guests.forEach(function (y) {
+              y.talks_to = (y.talks_to || []).map(function (n) { return n === prevName ? x.name : n; });
+            });
+            setTimeout(renderGuests, 0); // not while the browser is still moving focus out of this field
+          });
+          var talks = h("span", { class: "days" }, p.guests.filter(function (y) { return y !== x && y.name; }).map(function (y) {
+            var c = h("input", { type: "checkbox", checked: x.talks_to.indexOf(y.name) >= 0 });
+            c.addEventListener("change", function () {
+              x.talks_to = x.talks_to.filter(function (n) { return n !== y.name; });
+              if (c.checked) x.talks_to.push(y.name);
+            });
+            return h("label", null, c, y.name);
+          }));
+          add(guestBox, h("div", { class: "card app" },
+            h("div", { class: "row" }, field("Name", name), field("Type", kind),
+              field("ID", num(x, "id", { min: 100, placeholder: "203" })),
+              field("Address", text(x, "ip", { placeholder: "10.20.0.5", size: "14" })),
+              field("Ports", list(x, "ports", { placeholder: "8989", size: "12" }, true)),
+              field("Interface", text(x, "nic", { placeholder: "net0", size: "6" })),
+              h("button", { type: "button", class: "danger", text: "Remove", onclick: function () {
+                var gone = x.name;
+                p.guests.splice(i, 1);
+                p.guests.forEach(function (y) { y.talks_to = (y.talks_to || []).filter(function (n) { return n !== gone; }); });
+                renderGuests();
+              } })),
+            h("div", { class: "row" },
+              check(x, "from_gate", "The Gate reaches it", "Jellyfin and applications behind the Gate"),
+              check(x, "block_private", "Keep it off my LAN", "It can reach the internet, but no private networks except the guests it talks to"),
+              field("Talks to", talks.childNodes.length ? talks : h("span", { class: "muted small", text: "no other guests" }), "opens their ports for it"),
+              field("Also allow from", list(x, "sources", { placeholder: "none", size: "20" }), "optional addresses or networks"))));
+        });
+      }
+      renderGuests();
+
+      function fillFromNetwork() {
+        var have = {};
+        p.guests.forEach(function (x) { have[x.ip] = true; });
+        var added = 0;
+        (data.suggested.guests || []).forEach(function (x) {
+          if (!have[x.ip]) { p.guests.push(JSON.parse(JSON.stringify(x))); added++; }
+        });
+        renderGuests();
+        flash(added ? "Added " + added + " guest(s) from the Network tab; fill in their IDs." : "Every address from the Network tab is already here.");
+      }
+
+      function save() {
+        return api("PUT", V2 + "firewall", p).then(function (r) {
+          p.version = r.version;
+          showWarnings(r.warnings);
+          flash("Firewall plan saved (version " + r.version + ").");
+        }, function (err) {
+          if (err.status === 409) flash("The plan was changed meanwhile. Reload to see it.", true);
+          else fail(err);
+        });
+      }
+      function generate() {
+        api("POST", V2 + "firewall/script", p).then(function (r) {
+          showWarnings(r.warnings);
+          clear(out);
+          var url = URL.createObjectURL(new Blob([r.script], { type: "text/x-shellscript" }));
+          add(out, h("div", { class: "card" }, h("h2", { text: "Script for the Proxmox host" }),
+            h("p", { class: "small" }, "Copy it to the Proxmox host (not the Gate) and run it as root. Try ",
+              h("code", { text: "DRY_RUN=1 bash " + r.filename }), " first: it shows the files and changes nothing."),
+            h("div", { class: "row" }, h("a", { class: "button", href: url, download: r.filename, text: "Download " + r.filename }),
+              copyButton(r.script)),
+            h("pre", { class: "script", text: r.script })));
+        }, fail);
+      }
+
+      return [
+        h("div", { class: "card" }, h("h2", { text: "Proxmox firewall" }),
+          h("p", { class: "muted small", text: "Describe the Gate's container and every container or VM behind it, then generate a script for the Proxmox host. It writes each guest's firewall so only the Gate (and the guests you choose) can reach it, and a guest can't pretend to be the Gate. Give guests static addresses." }),
+          fresh ? h("p", { class: "small", text: "Started from the Network tab's addresses. Fill in the container IDs and save." }) : null,
+          warnBox),
+        gateCard,
+        h("div", { class: "card" }, h("h2", { text: "Behind the Gate" }), guestBox,
+          h("div", { class: "row" },
+            h("button", { type: "button", class: "secondary", text: "Add guest", onclick: function () {
+              p.guests.push({ name: "", kind: "ct", id: 0, ip: "", ports: [], from_gate: true, talks_to: [], sources: [], block_private: true, nic: "net0" });
+              renderGuests();
+            } }),
+            h("button", { type: "button", class: "secondary", text: "Add from Network settings", onclick: fillFromNetwork }))),
+        h("div", { class: "row" }, h("button", { type: "button", text: "Save plan", onclick: save }),
+          h("button", { type: "button", class: "secondary", text: "Generate script", onclick: generate }),
+          p.version ? h("span", { class: "muted small", text: "Version " + p.version + ", saved " + when(p.updated_at) + " by " + p.updated_by }) : null),
+        out
+      ];
+    });
+  };
 
   // ---- security: deployment status, admin keys ----
 
