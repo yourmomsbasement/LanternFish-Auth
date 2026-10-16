@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -94,21 +93,6 @@ func ParsePublicKeys(data []byte) ([]PublicKey, error) {
 		keys = append(keys, PublicKey{Key: raw, Comment: strings.Join(f[2:], " ")})
 	}
 	return keys, sc.Err()
-}
-
-func LoadPublicKeys(path string) ([]PublicKey, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	keys, err := ParsePublicKeys(data)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("%s holds no keys", path)
-	}
-	return keys, nil
 }
 
 // ParseManifest parses a manifest without checking any signature.

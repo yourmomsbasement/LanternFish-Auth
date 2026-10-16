@@ -2,7 +2,7 @@
 # Sign Lanternfish Gate releases on your admin PC.
 #
 #   sign-releases.sh keygen      create your signing key (once)
-#   sign-releases.sh pubkey      print its public key line for /etc/lanternfish/release-keys
+#   sign-releases.sh pubkey      print its public key line for internal/update/trusted-keys
 #   sign-releases.sh pending     list releases waiting for a signature (exit status 3 if any)
 #   sign-releases.sh sign [TAG]  check every file, sign and upload (default: all pending)
 #   sign-releases.sh notify      post to LANTERNFISH_ALERT_WEBHOOK if any are waiting (for a timer)
@@ -102,7 +102,7 @@ cmd_keygen() {
   openssl genpkey -algorithm ed25519 | ossl pkcs8 -topk8 -v2 aes-256-cbc -scrypt -passout env:LF_PASS -out "$KEY"
   chmod 600 "$KEY"
   echo "Wrote $KEY. Back it up offline (USB stick, password manager); never upload it." >&2
-  echo "Put this line in /etc/lanternfish/release-keys on each Gate:" >&2
+  echo "Put this line in internal/update/trusted-keys in the repository, commit it, and release:" >&2
   cmd_pubkey_with_pass
 }
 

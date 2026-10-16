@@ -663,7 +663,7 @@
       out.push(head);
       if (!u.supported) {
         add(head, h("p", { class: "bad", text: "Updating from here isn't available: " + (u.reason || "unknown reason") }),
-          h("p", { class: "muted small", text: "See docs/RELEASES.md: install the updater (install-gate.sh from a release) and put your release signing public key in " + (u.keys_path || "/etc/lanternfish/release-keys") + "." }));
+          h("p", { class: "muted small", text: "See docs/RELEASES.md. The updater comes with install-gate.sh from release 0.2.1 or later; official builds carry the release signing key." }));
       }
       if (u.status) {
         var s = u.status, cls = s.state === "succeeded" ? "ok" : (s.state === "installing" ? "" : "bad");

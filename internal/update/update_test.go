@@ -365,3 +365,29 @@ func TestRequestMustBeARegularFile(t *testing.T) {
 		t.Fatal("accepted unknown fields")
 	}
 }
+
+func TestTrustedKeys(t *testing.T) {
+	// The committed key file must always parse: a bad line would turn off
+	// updates for everyone.
+	builtIn, err := BuiltInKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, extra := testKey(t)
+	dir := t.TempDir()
+	local := filepath.Join(dir, "release-keys")
+	os.WriteFile(local, []byte("# local\nlfrk1 "+base64.StdEncoding.EncodeToString(extra[0].Key)+" spare key\n"), 0o644)
+	keys, err := TrustedKeys(local)
+	if err != nil || len(keys) != len(builtIn)+1 || keys[len(keys)-1].Comment != "spare key" {
+		t.Fatalf("built-in plus local: %v %v", keys, err)
+	}
+	os.WriteFile(local, []byte("not a key\n"), 0o644)
+	if _, err := TrustedKeys(local); err == nil {
+		t.Fatal("accepted a malformed local key file")
+	}
+	if len(builtIn) == 0 {
+		if _, err := TrustedKeys(filepath.Join(dir, "missing")); err == nil {
+			t.Fatal("no keys at all should be an error")
+		}
+	}
+}

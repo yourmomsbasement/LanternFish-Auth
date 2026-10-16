@@ -134,8 +134,10 @@ Schedules, blackouts, per-device profiles and owners are described in
 
 ### Updates
 
-Releases are signed with a key only you hold, and Gates install only signed
-releases: from the dashboard's Updates tab, or nightly if you turn that on.
+Releases are signed with the maintainer's offline key, whose public half is
+built into every Gate, so anyone running one gets verified updates without
+setting anything up: from the dashboard's Updates tab, or nightly if you
+turn that on.
 A failed update rolls itself back. Setup and the release routine are in
 [docs/RELEASES.md](docs/RELEASES.md).
 
