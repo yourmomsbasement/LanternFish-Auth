@@ -48,7 +48,7 @@ func changesState(r *http.Request) bool {
 	}
 	switch r.URL.Path {
 	case pathPrefix + "v1/challenge", pathPrefix + "v1/session", pathPrefix + "v1/logout",
-		pathPrefix + "v2/challenge", pathPrefix + "v2/session", pathPrefix + "v2/logout",
+		pathPrefix + "v2/challenge", pathPrefix + "v2/session", pathPrefix + "v2/logout", pathPrefix + "v2/link/code",
 		adminPath + "/session", adminPath + "/logout":
 		return false
 	}

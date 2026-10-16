@@ -169,6 +169,41 @@ If you lose the authenticator and its recovery codes, stop the Gate and run
 Old apps (protocol v1) keep working wherever no approval is needed. Details:
 [Additional verification](docs/PROTOCOL.md#additional-verification-v2).
 
+### Network settings and more applications
+
+The dashboard's **Network** tab changes, without editing `gate.env` or
+restarting:
+
+* **Jellyfin's address**, with a *Test* button that checks the Gate can reach it.
+* **The sign-in host**: Jellyfin's public name, where browsers enroll.
+* **The admin networks** the dashboard and admin API answer from. Your own
+  address must stay in the list. If you lock yourself out anyway, stop the
+  Gate and run `lanternfish-gate settings reset -admin-only` on the host.
+
+It also lists the listen address and the TLS certificate's names and expiry,
+which stay in `gate.env`.
+
+**Putting another web application behind the Gate** (Sonarr, Radarr,
+Jellyseerr, Home Assistant…):
+
+1. Give it its own hostname, e.g. `sonarr.example.com`, pointing at the Gate
+   like Jellyfin's. Apps get hostnames, not sub-paths: most break under a path.
+2. Add the hostname to the Gate's certificate (see
+   [the Proxmox guide](deploy/proxmox/README.md#adding-more-applications)).
+3. Let the Gate reach the application, and nothing else reach it.
+4. On the Network tab, *Add application*: its name, hostname, and the
+   address the Gate reaches it at (`http://10.20.0.5:8989`). Optionally limit
+   it to some owners. Save.
+
+Devices, owners, policies, schedules and approvals are the same as Jellyfin's.
+The first time a browser opens the application it is sent to the sign-in host,
+signs in there as usual, and comes back *linked*. That gives it its own key for
+the application, shown on the Devices tab, which stops working when its device
+is revoked. Keep the application's own login on: the Gate decides who may
+reach it, not who they are inside it. Phone apps that talk to these
+applications with their own API keys (LunaSea, nzb360…) can't sign in to the
+Gate.
+
 ### Updates
 
 Releases are signed with the maintainer's offline key, whose public half is

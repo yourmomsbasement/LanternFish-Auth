@@ -16,6 +16,7 @@
   var API = "/_lanternfish/v2/";
   var ENROLL_CONTEXT = "lanternfish-gate/v1/enroll\n";
   var SESSION_CONTEXT = "lanternfish-gate/v1/session\n";
+  var LINK_CONTEXT = "lanternfish-gate/v2/link\n";
 
   function openDB() {
     return new Promise(function (resolve, reject) {
@@ -198,7 +199,33 @@
     renew();
   }
 
+  // site says whether this host is an application behind the Gate, and
+  // where browsers sign in.
+  function site() {
+    return fetch(API + "site", { credentials: "same-origin" }).then(function (res) { return res.json(); });
+  }
+
+  // linkCode asks (on the sign-in host, signed in) for a code that links
+  // this browser to the application at host.
+  function linkCode(host) { return post("link/code", { host: host }); }
+
+  // link redeems a code on an application's host: this origin gets its own
+  // key, recorded as linked to the device that asked for the code.
+  function link(code) {
+    var pair;
+    return crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])
+      .then(function (p) {
+        pair = p;
+        return Promise.all([crypto.subtle.exportKey("spki", p.publicKey), sign(p.privateKey, LINK_CONTEXT + code)]);
+      }).then(function (r) {
+        return post("link/redeem", { code: code, public_key: b64(r[0]), proof: b64(r[1]) });
+      }).then(function (res) {
+        return saveDevice({ deviceId: res.device.device_id, privateKey: pair.privateKey });
+      });
+  }
+
   window.LanternfishGate = {
+    site: site, linkCode: linkCode, link: link,
     enroll: enroll, finishEnrollment: finishEnrollment, signIn: signIn,
     completeVerification: completeVerification, hasDevice: hasDevice, forget: forget,
     hasPendingEnrollment: function () { return loadPending().then(function (p) { return !!(p && p.verificationId); }); }

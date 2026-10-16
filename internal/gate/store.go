@@ -44,6 +44,12 @@ type Device struct {
 	// Override is an admin-set policy for this device alone, ahead of its
 	// profile and the global policy.
 	Override *DeviceOverride `json:"override,omitempty"`
+
+	// ParentID is set on a browser key linked to an enrolled device for one
+	// application hostname (LinkedHost); see linked.go. It works only while
+	// its parent does, only on that host, and under its parent's policy.
+	ParentID   string `json:"parent_id,omitempty"`
+	LinkedHost string `json:"linked_host,omitempty"`
 }
 
 // DeviceOverride points a device at its own policy version for a while.
@@ -169,6 +175,10 @@ type storeData struct {
 	GlobalPolicyVersion int                 `json:"global_policy_version,omitempty"`
 	LastPolicyVersion   int                 `json:"last_policy_version,omitempty"`
 	PolicyHistory       []PolicyRecord      `json:"policy_history,omitempty"`
+
+	// Settings are the network settings changed from the dashboard (nil:
+	// everything comes from the environment); see settings.go.
+	Settings *GateSettings `json:"settings,omitempty"`
 }
 
 // maxPolicyHistory bounds stored policy versions; the ones in use are always kept.

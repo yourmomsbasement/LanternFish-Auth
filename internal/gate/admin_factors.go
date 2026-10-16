@@ -406,11 +406,7 @@ func (g *Gate) handleResetEnrollment(w http.ResponseWriter, r *http.Request, key
 		d.Tickets[t.ID] = t
 		return nil
 	})
-	g.sessions.removeDevice(id)
-	g.grants.removeDevice(id)
-	g.accessChanged()
-	g.streams.cancelDevice(id)
-	g.verifications.removeDevice(id)
+	g.endAccess(id)
 	if errors.Is(err, errMissing) {
 		g.unsavedRevocations.Delete(id)
 		writeError(w, http.StatusNotFound, "no such device")

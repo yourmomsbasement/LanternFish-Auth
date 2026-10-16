@@ -118,3 +118,4 @@ button.small { font-size: 0.8rem; padding: 0; }
 dialog { color: var(--text); background: var(--card); border: 1px solid var(--border); max-width: min(480px, calc(100vw - 32px)); }
 dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
 dialog input { width: 9em; }
+textarea.short { min-height: 0; height: auto; width: min(32em, 100%); }

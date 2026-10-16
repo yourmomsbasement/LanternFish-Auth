@@ -499,6 +499,61 @@ shown once), `recovery-codes` (new set, old ones stop working),
 `done`. Replacing an existing authenticator needs a link issued with
 `replace_totp` or a recovery-code grant.
 
+## Network settings and applications
+
+The admin API's `settings` scope (sensitive: dashboard re-verification
+applies) reads and changes:
+
+* `upstream`: Jellyfin's address;
+* `admin_allow`: the admin networks;
+* `primary_host`: the sign-in host;
+* `apps`: more applications behind the Gate.
+
+They are stored in the data file. Empty values fall back to `gate.env`, and
+changes apply to the next request. A save naming networks that don't include
+the caller's own address is refused. `lanternfish-gate settings reset
+[-admin-only]` (Gate stopped) goes back to `gate.env`.
+
+**Routing.** A request whose `Host` is an enabled application's hostname
+goes to that application's address; any other host goes to Jellyfin. Every
+host is authorized the same way (devices, owners, policies), plus the
+application's `owners` list (empty: everyone). Otherwise the answer is `403
+app_not_allowed`.
+
+The Gate never forwards its own credentials or `X-Lanternfish-*` headers
+from the client. Per application:
+
+* `preserve_host` sends the public hostname rather than the upstream's.
+* `identity_headers` sends the device ID and the Gate signature Jellyfin gets.
+* `inject_renewal` adds the session-renewal script to the application's HTML
+  pages.
+
+Changing or removing an application closes its open streams.
+
+**Linking browsers.** A browser's key and session cookie belong to one
+origin. On an application's host:
+
+1. The page (`GET /_lanternfish/v2/site` tells it where to go) sends the
+   browser to `https://<sign-in host>/_lanternfish/?link=<app host>`.
+2. The browser signs in there as usual, additional verification included.
+3. It calls `POST /_lanternfish/v2/link/code {host}` with its session cookie
+   and gets `{code, origin}`.
+4. It goes to `<origin>/_lanternfish/#link=<code>`.
+5. That page makes a key for its own origin and calls `POST
+   /_lanternfish/v2/link/redeem {code, public_key, proof}`. `proof` signs
+   `"lanternfish-gate/v2/link\n" + code`.
+6. The new device is *linked* (`parent_id`, `linked_host`).
+
+Codes are single use, last 2 minutes, name one application host, and must be
+redeemed on that host from the address they were issued to.
+
+A linked device:
+
+* works only on its host, and only while its parent is active and not
+  suspended, so revoking the parent revokes it;
+* has its parent's owner;
+* follows its parent's profile, and its parent's own policy if it has one.
+
 ## Signed requests to Jellyfin
 
 Network isolation is the first lock on the Gate→Jellyfin link. The
@@ -578,14 +633,14 @@ Tickets also take `subject_id` (the owner; default `sub_default`),
 
 **Scopes.** Admin keys can be limited with `admin-key create -scopes`:
 `tickets`, `devices`, `policy-read`, `policy-write`, `owners`,
-`factor-recovery`, `audit`, `updates`. A key without scopes (older keys
+`factor-recovery`, `audit`, `updates`, `settings`. A key without scopes (older keys
 included) has all of them. A request outside the key's scopes gets `403
 scope_required`.
 
 **Re-verification.** Link an admin key to an owner with the `admin` role
 (`admin-key link ID SUBJECT`, or the dashboard's Security tab). Once that owner
 has an authenticator app, dashboard changes in the sensitive scopes
-(`policy-write`, `owners`, `factor-recovery`, `updates`) answer `403
+(`policy-write`, `owners`, `factor-recovery`, `updates`, `settings`) answer `403
 recent_verification_required` unless the dashboard session passed `POST
 /_lanternfish/admin/verify {code}` in the last 5 minutes. Bearer-key requests
 (the Builder, scripts) aren't affected; protect those keys with scopes.
@@ -635,6 +690,8 @@ Admin API v2 (same guard):
 | `POST /_lanternfish/admin/v2/devices/{id}/reset-enrollment` | Revoke the device and return a replacement ticket |
 | `POST /_lanternfish/admin/v2/devices/{id}/unsuspend` | Lift a suspension (after a MAC change under `reenroll`) |
 | `POST /_lanternfish/admin/verify` / `link` | Dashboard re-verification `{code}`; link the key to an admin owner `{subject_id}` |
+| `GET`/`PUT /_lanternfish/admin/v2/settings` | Network settings and applications; `PUT` takes the whole document with its `version` (`409` if stale, `422` with `problems` if invalid) |
+| `POST /_lanternfish/admin/v2/settings/test-upstream` | `{url}` → whether the Gate can reach it (status, time) |
 
 ## Abuse controls
 

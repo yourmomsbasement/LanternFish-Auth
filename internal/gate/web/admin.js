@@ -206,6 +206,7 @@
 
   tabs.devices = function () {
     return api("GET", V1 + "devices").then(function (data) {
+      data.devices.forEach(function (d) { deviceNames[d.id] = d.name; });
       var showRevoked = h("input", { type: "checkbox", id: "showrev" });
       var table = h("table", null, h("thead", null, h("tr", null,
         ["Device", "Owner", "Policy", "Networks", "Sessions", "Last sign-in", ""].map(function (t) { return h("th", { text: t }); }))));
@@ -242,7 +243,8 @@
           var detail = h("tr", { hidden: true }, h("td", { colspan: "7" }));
           var badges = h("div", { class: "chips" },
             d.suspended ? h("span", { class: "chip bad", text: "suspended: " + d.suspended.replace(/_/g, " ") }) : null,
-            d.override ? h("span", { class: "chip", text: "own policy" + (d.override.expires_at ? " until " + when(d.override.expires_at) : "") }) : null);
+            d.override ? h("span", { class: "chip", text: "own policy" + (d.override.expires_at ? " until " + when(d.override.expires_at) : "") }) : null,
+            d.parent_id ? h("span", { class: "chip", text: "linked for " + d.linked_host }) : null);
           add(body, h("tr", null,
             h("td", null, h("strong", { text: d.name || "(unnamed)" }), h("div", { class: "muted small" },
               d.platform + " · ", h("span", { class: "mono", text: d.id }), " · enrolled " + when(d.created_at) + " from " + d.enrolled_from),
@@ -268,6 +270,9 @@
     });
   };
 
+  var deviceNames = {};
+  function deviceName(id) { return deviceNames[id] || id; }
+
   // deviceDetail: key, location, MAC evidence, own policy and recovery actions.
   function deviceDetail(d) {
     var path = V2 + "devices/" + encodeURIComponent(d.id);
@@ -275,6 +280,8 @@
     function kv(k, v) { return [h("dt", { text: k }), h("dd", null, v)]; }
     add(box, h("dl", null,
       kv("Key fingerprint", h("span", { class: "mono", text: d.key_fingerprint || "—" })),
+      d.parent_id ? kv("Linked to", h("span", null, deviceName(d.parent_id) + " for " + d.linked_host +
+        " (follows that device: revoking it revokes this too)")) : null,
       kv("Countries", d.countries.length ? d.countries.map(function (c) {
         return (c.country || "unknown (" + c.network + ")") + " via " + c.method + ", until " + when(c.expires_at);
       }).join("; ") : "none recorded"),
@@ -871,6 +878,134 @@
     }, fail);
     return box;
   }
+
+  // ---- network: Jellyfin, admin networks, applications ----
+
+  tabs.network = function () {
+    return api("GET", V2 + "settings").then(function (data) {
+      var s = JSON.parse(JSON.stringify(data.settings));
+      s.apps = s.apps || [];
+      s.admin_allow = s.admin_allow || [];
+      var env = data.environment, live = data.effective;
+
+      function input(obj, key, attrs) {
+        var el = h("input", Object.assign({ value: obj[key] || "" }, attrs || {}));
+        el.addEventListener("input", function () { obj[key] = el.value.trim(); });
+        return el;
+      }
+      function check(obj, key, label, hint) {
+        var el = h("input", { type: "checkbox", checked: obj[key] });
+        el.addEventListener("change", function () { obj[key] = el.checked; });
+        return h("label", { title: hint || "" }, el, " " + label);
+      }
+      function field(label, el, hint) {
+        return h("div", { class: "field" }, h("label", { text: label }), el, hint ? h("span", { class: "muted small", text: hint }) : null);
+      }
+      function testButton(getURL) {
+        var out = h("span", { class: "small" });
+        return h("span", null, h("button", { type: "button", class: "secondary", text: "Test", onclick: function () {
+          var u = getURL();
+          if (!u) { out.textContent = "enter an address"; out.className = "small bad"; return; }
+          out.textContent = "…"; out.className = "small muted";
+          api("POST", V2 + "settings/test-upstream", { url: u }).then(function (r) {
+            out.textContent = r.reachable ? " answered HTTP " + r.status + " in " + r.ms + " ms" + (r.server ? " (" + r.server + ")" : "")
+              : " not reachable: " + r.error;
+            out.className = "small " + (r.reachable ? "ok" : "bad");
+          }, fail);
+        } }), out);
+      }
+
+      var upstream = input(s, "upstream", { placeholder: env.upstream, size: "34" });
+      var primary = input(s, "primary_host", { placeholder: env.primary_host || "flix.example.com", size: "28" });
+      var admins = h("textarea", { rows: "4", class: "short", spellcheck: "false", placeholder: env.admin_allow.join("\n") });
+      admins.value = s.admin_allow.join("\n");
+      admins.addEventListener("input", function () {
+        s.admin_allow = admins.value.split(/[\s,]+/).filter(Boolean);
+      });
+      var tls = data.tls;
+
+      var gateCard = h("div", { class: "card" }, h("h2", { text: "Jellyfin and the Gate" }),
+        h("p", { class: "muted small", text: "Empty fields use gate.env. Changes apply to the next request; no restart." }),
+        h("div", { class: "row" },
+          field("Jellyfin address", upstream, "in use: " + live.upstream),
+          testButton(function () { return s.upstream || env.upstream; })),
+        h("div", { class: "row" },
+          field("Sign-in host (Jellyfin's public name)", primary, live.primary_host ? "in use: " + live.primary_host
+            : "not set: applications can't link browsers")),
+        h("div", { class: "row" },
+          field("Admin networks (one per line: address or CIDR)", admins,
+            "in use: " + live.admin_allow.join(", ") + ". Your address " + live.client_address + " must stay in the list.")),
+        h("h3", { text: "Set in gate.env (restart to change)" }),
+        h("dl", null,
+          h("dt", { text: "Listening on" }), h("dd", { class: "mono", text: env.listen || "—" }),
+          h("dt", { text: "TLS certificate" }), h("dd", null, tls.available
+            ? (tls.names || []).join(", ") + " — " + (tls.issuer || "") + ", expires " + when(tls.not_after)
+            : h("span", { class: "muted", text: tls.error || "unknown" }))));
+
+      var appBox = h("div");
+      function renderApps() {
+        clear(appBox);
+        if (!s.apps.length) add(appBox, h("p", { class: "muted", text: "No applications yet. Only Jellyfin is behind the Gate." }));
+        s.apps.forEach(function (a, i) {
+          a.hosts = a.hosts || [];
+          a.owners = a.owners || [];
+          var hosts = h("input", { value: a.hosts.join(", "), placeholder: "sonarr.example.com", size: "34" });
+          hosts.addEventListener("input", function () { a.hosts = hosts.value.split(/[\s,]+/).filter(Boolean); });
+          var owners = h("span", { class: "days" }, cache.subjects.map(function (o) {
+            var c = h("input", { type: "checkbox", checked: a.owners.indexOf(o.id) >= 0 });
+            c.addEventListener("change", function () {
+              a.owners = a.owners.filter(function (x) { return x !== o.id; });
+              if (c.checked) a.owners.push(o.id);
+            });
+            return h("label", null, c, o.name);
+          }));
+          add(appBox, h("div", { class: "card app" },
+            h("div", { class: "row" },
+              field("Name", input(a, "name", { placeholder: "Sonarr", maxlength: "64" })),
+              check(a, "enabled", "Enabled"),
+              h("button", { type: "button", class: "danger", text: "Remove", onclick: function () {
+                if (!confirm("Remove " + (a.name || "this application") + "? Its open connections close when you save.")) return;
+                s.apps.splice(i, 1); renderApps();
+              } })),
+            h("div", { class: "row" },
+              field("Public hostnames", hosts, "comma-separated; each needs DNS pointing at the Gate and a place in its TLS certificate"),
+              field("Address behind the Gate", input(a, "upstream", { placeholder: "http://10.20.0.5:8989", size: "30" })),
+              testButton(function () { return a.upstream; })),
+            h("div", { class: "row" }, field("Owners allowed (none ticked: every owner)", owners)),
+            h("div", { class: "row" },
+              check(a, "preserve_host", "Send the public hostname", "What most apps behind a reverse proxy expect"),
+              check(a, "inject_renewal", "Keep browser sessions alive", "Adds the session-renewal script to the app's pages"),
+              check(a, "identity_headers", "Send Lanternfish identity headers", "The device ID and a Gate signature, as Jellyfin gets"))));
+        });
+      }
+      renderApps();
+
+      function save() {
+        var body = JSON.parse(JSON.stringify(s));
+        api("PUT", V2 + "settings", body).then(function (r) {
+          flash("Saved (version " + r.version + ").");
+          reload();
+        }, function (err) {
+          if (err.status === 409) flash("The settings were changed meanwhile. Reload to see them.", true);
+          else fail(err);
+        });
+      }
+
+      return [
+        data.warnings.length ? h("div", { class: "card" }, data.warnings.map(function (w) { return h("p", { class: "bad", text: "⚠ " + w }); })) : null,
+        gateCard,
+        h("div", { class: "card" }, h("h2", { text: "Applications behind the Gate" }),
+          h("p", { class: "muted small", text: "Each application gets its own hostname. Browsers sign in on the sign-in host and are linked to the application the first time; native apps use their session as usual. Devices, owners and policies are the same as Jellyfin's." }),
+          appBox,
+          h("button", { type: "button", class: "secondary", text: "Add application", onclick: function () {
+            s.apps.push({ name: "", enabled: true, hosts: [], upstream: "", owners: [], preserve_host: true, inject_renewal: true, identity_headers: false });
+            renderApps();
+          } })),
+        h("div", { class: "row" }, h("button", { type: "button", text: "Save network settings", onclick: save }),
+          s.version ? h("span", { class: "muted small", text: "Version " + s.version + ", saved " + when(s.updated_at) + " by " + s.updated_by }) : null)
+      ];
+    });
+  };
 
   // ---- security: deployment status, admin keys ----
 

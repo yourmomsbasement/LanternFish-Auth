@@ -547,6 +547,11 @@ func (g *Gate) handleAssignProfile(w http.ResponseWriter, r *http.Request, key *
 			}
 		}
 		dev.ProfileID = req.ProfileID
+		for _, other := range d.Devices {
+			if other.ParentID == id {
+				other.ProfileID = req.ProfileID // linked devices follow their parent
+			}
+		}
 		return nil
 	})
 	switch {
@@ -565,9 +570,13 @@ func (g *Gate) handleAssignProfile(w http.ResponseWriter, r *http.Request, key *
 	}
 	// The device's sessions now carry another policy's version, so they are
 	// re-checked on their next request; grants and streams are re-checked now.
+	linked := g.linkedTo(id)
 	g.grants.removeDevice(id)
 	g.accessChanged()
 	g.recheckDeviceStreams(id)
+	for _, c := range linked {
+		g.recheckDeviceStreams(c)
+	}
 	g.audit.write(g.cfg.Now(), "device_profile_assigned", map[string]any{"device_id": id, "profile_id": req.ProfileID,
 		"admin_key": key.Name, "ip": clientIP(r)})
 	w.WriteHeader(http.StatusNoContent)

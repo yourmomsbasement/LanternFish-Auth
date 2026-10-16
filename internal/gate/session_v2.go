@@ -239,11 +239,7 @@ func (g *Gate) suspendDevice(deviceID, reason string, now time.Time) {
 		}
 		return nil
 	})
-	g.sessions.removeDevice(deviceID)
-	g.grants.removeDevice(deviceID)
-	g.accessChanged()
-	g.streams.cancelDevice(deviceID)
-	g.verifications.removeDevice(deviceID)
+	g.endAccess(deviceID)
 	fields := map[string]any{"device_id": deviceID, "reason": reason}
 	if err != nil {
 		fields["error"] = err.Error()

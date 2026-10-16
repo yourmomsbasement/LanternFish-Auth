@@ -38,6 +38,9 @@ const usage = `Usage:
   lanternfish-gate factor list               Owners and their factors
   lanternfish-gate factor reset SUBJECT      Break-glass: remove an owner's authenticator app,
                                              passkeys and recovery codes (then send a setup link)
+  lanternfish-gate settings show             Network settings changed from the dashboard
+  lanternfish-gate settings reset [-admin-only]  Break-glass: go back to gate.env's settings
+                                             (-admin-only: just the admin networks)
   lanternfish-gate device-ca                 Print the device CA certificate
   lanternfish-gate upstream-key              Print the key for Jellyfin's Lanternfish plugin
   lanternfish-gate version                   Print the version
@@ -47,7 +50,7 @@ Updates (signed releases only; see docs/RELEASES.md):
   lanternfish-gate update check              Show the newest verified release
   lanternfish-gate update apply [-version X] Install it (root; normally done by the updater service)
 
-admin-key, factor, device-ca and upstream-key read the data file directly; stop the Gate first.
+admin-key, factor, settings, device-ca and upstream-key read the data file directly; stop the Gate first.
 
 Environment:
   LANTERNFISH_LISTEN             listen address (default :8443)
@@ -95,6 +98,8 @@ func main() {
 		err = adminKey(args[1:])
 	case "factor":
 		err = factorCmd(args[1:])
+	case "settings":
+		err = settingsCmd(args[1:])
 	case "device-ca":
 		err = deviceCA()
 	case "upstream-key":
@@ -212,6 +217,8 @@ func serve() error {
 	cfg.Version = version
 	cfg.Updates = gateUpdates()
 	cfg.ProbationPath = probationPath()
+	cfg.Listen = env("LANTERNFISH_LISTEN", ":8443")
+	cfg.TLSCertFile = certFile
 	if p := cfg.Updates; p != nil {
 		switch p.AutoPolicy {
 		case "off", "patch", "minor", "all":
@@ -227,7 +234,7 @@ func serve() error {
 	gate.WarnIfExposed(cfg.Upstream)
 
 	srv := &http.Server{
-		Addr:              env("LANTERNFISH_LISTEN", ":8443"),
+		Addr:              cfg.Listen,
 		Handler:           g.Handler(),
 		TLSConfig:         g.TLSConfig(certs.GetCertificate),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -325,6 +332,40 @@ func factorCmd(args []string) error {
 		fmt.Printf("Removed every factor of %s. Start the Gate and send them a new setup link from the dashboard.\n", args[1])
 	default:
 		return fmt.Errorf("unknown factor command %q", args[0])
+	}
+	return nil
+}
+
+func settingsCmd(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: settings show | settings reset [-admin-only]")
+	}
+	a, unlock, err := openOffline()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	switch args[0] {
+	case "show":
+		out, err := a.SettingsJSON()
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+	case "reset":
+		fs := flag.NewFlagSet("settings reset", flag.ExitOnError)
+		adminOnly := fs.Bool("admin-only", false, "reset only the admin networks")
+		fs.Parse(args[1:])
+		if err := a.ResetSettings(*adminOnly); err != nil {
+			return err
+		}
+		if *adminOnly {
+			fmt.Println("The admin networks are back to LANTERNFISH_ADMIN_ALLOW (or private networks). Start the Gate.")
+		} else {
+			fmt.Println("Network settings are back to gate.env; applications were removed. Start the Gate.")
+		}
+	default:
+		return fmt.Errorf("unknown settings command %q", args[0])
 	}
 	return nil
 }

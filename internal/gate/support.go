@@ -307,6 +307,7 @@ type streamAuth struct {
 	expires  time.Time // zero: unknown
 	deadline time.Time // when the stream must close; zero: none
 	session  string    // token hash of the session that opened it, if any
+	app      string    // the application it goes to ("": Jellyfin)
 }
 
 // streamVerdict is a recheck's judgement on one stream.
@@ -375,6 +376,23 @@ func (t *streamTable) track(parent context.Context, deviceID string, a streamAut
 		}
 		t.mu.Unlock()
 		cancel()
+	}
+}
+
+// cancelWhere closes every stream whose application matches.
+func (t *streamTable) cancelWhere(match func(app string) bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for dev, m := range t.byDevice {
+		for id, st := range m {
+			if match(st.app) {
+				st.cancel()
+				delete(m, id)
+			}
+		}
+		if len(m) == 0 {
+			delete(t.byDevice, dev)
+		}
 	}
 }
 

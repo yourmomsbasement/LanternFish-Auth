@@ -102,9 +102,12 @@ func (g *Gate) policyFor(dev *Device) *compiledPolicy {
 	set := g.policies.Load()
 	// Precedence: the device's own override (until it expires), then its
 	// profile, then the global policy.
-	if p := set.overrides[dev.ID]; p != nil {
-		if exp, ok := set.expires[dev.ID]; !ok || g.cfg.Now().Before(exp) {
-			return p
+	// A linked device follows its parent's own policy.
+	for _, id := range []string{dev.ID, dev.ParentID} {
+		if p := set.overrides[id]; id != "" && p != nil {
+			if exp, ok := set.expires[id]; !ok || g.cfg.Now().Before(exp) {
+				return p
+			}
 		}
 	}
 	if dev.ProfileID != "" {

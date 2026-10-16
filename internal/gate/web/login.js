@@ -36,7 +36,8 @@
     mac_report_required: "This device must report its network address, which this app doesn't do.",
     mac_report_unsupported: "This device's profile needs a native app; browsers can't use it.",
     reported_mac_changed: "This device was suspended because its reported network address changed. It must be re-enrolled.",
-    verification_required: "This device needs your approval again."
+    verification_required: "This device needs your approval again.",
+    app_not_allowed: "This device's owner isn't allowed to use this application."
   };
   function reasonText(code) { return REASONS[code] || ""; }
 
@@ -46,16 +47,40 @@
     document.getElementById("ticket").focus();
   }
 
+  // Linking: on the sign-in host, ?link=HOST asks to link this browser to
+  // the application at HOST once signed in (the Gate checks HOST is one).
+  var params = new URLSearchParams(location.search);
+  var linkHost = /^[a-z0-9.-]{1,253}$/.test(params.get("link") || "") ? params.get("link") : "";
+
+  // afterSignIn: back to the page that sent us here, or on to the application.
+  function afterSignIn() {
+    if (!linkHost) {
+      location.replace(nextPath());
+      return new Promise(function () {});
+    }
+    status.textContent = "Linking this browser to the application…";
+    return window.LanternfishGate.linkCode(linkHost).then(function (res) {
+      // The code travels in the fragment; the application's page checks next.
+      location.replace(res.origin + "/_lanternfish/?next=" + encodeURIComponent(params.get("next") || "/") +
+        "#link=" + encodeURIComponent(res.code));
+      return new Promise(function () {});
+    }, function (err) {
+      status.textContent = err.reason === "app_not_allowed" ? reasonText("app_not_allowed") : "Couldn't link: " + err.message;
+      return new Promise(function () {});
+    });
+  }
+
   // toVerify goes to the verification page. The handle travels in the
   // fragment, which browsers never send to a server.
   function toVerify(id, enroll) {
+    var back = linkHost ? location.pathname + location.search : nextPath();
     location.assign("/_lanternfish/verify#id=" + encodeURIComponent(id) + (enroll ? "&enroll=1" : "") +
-      "&next=" + encodeURIComponent(nextPath()));
+      "&next=" + encodeURIComponent(back));
   }
 
   function signIn() {
     status.textContent = "Signing in…";
-    return window.LanternfishGate.signIn().then(function () { location.replace(nextPath()); }, function (err) {
+    return window.LanternfishGate.signIn().then(afterSignIn, function (err) {
       if (err.status === 403 && err.data && err.data.error === "additional_verification_required") {
         status.textContent = "This sign-in needs your approval…";
         toVerify(err.data.verification_id, false);
@@ -102,23 +127,68 @@
     return;
   }
 
-  window.LanternfishGate.hasDevice().then(function (has) {
-    if (!has) {
-      showEnroll("This browser isn't enrolled yet. Paste an enrollment ticket from Lanternfish Builder.");
+  window.LanternfishGate.site().then(function (site) {
+    return site.app ? appHost(site) : signInHere();
+  }, signInHere);
+
+  // appHost: an application behind the Gate. This origin holds its own key,
+  // linked to the browser's device on the sign-in host.
+  function appHost(site) {
+    function viaSignInHost() {
+      if (!site.sign_in_origin) {
+        status.textContent = "This browser needs linking from the Gate's sign-in host, which isn't set up. Ask the administrator.";
+        return;
+      }
+      status.textContent = "Signing in through " + site.sign_in_origin.replace("https://", "") + "…";
+      location.replace(site.sign_in_origin + "/_lanternfish/?link=" + encodeURIComponent(location.hostname) +
+        "&next=" + encodeURIComponent(nextPath()));
+    }
+    // Signed in, but the owner may not use this application: say so rather
+    // than sending the browser round in circles.
+    if (params.get("reason") === "app_not_allowed") {
+      status.textContent = reasonText("app_not_allowed");
       return;
     }
-    var why = reasonText(new URLSearchParams(location.search).get("reason") || "");
-    if (why) status.textContent = why + " Checking again…";
-    return signIn().catch(function (err) {
-      if (err.status === 403 || err.status === 503) {
+    var code = /(?:^#|&)link=([^&]+)/.exec(location.hash);
+    if (code) {
+      history.replaceState(null, "", location.pathname + location.search);
+      status.textContent = "Linking this browser to " + site.app_name + "…";
+      return window.LanternfishGate.link(decodeURIComponent(code[1])).then(signIn).catch(function (err) {
+        status.textContent = "Couldn't link this browser: " + err.message;
+      });
+    }
+    return window.LanternfishGate.hasDevice().then(function (has) {
+      if (!has) return viaSignInHost();
+      return signIn().catch(function (err) {
+        if (err.status === 401) {
+          // The linked key was revoked or is unknown: link again.
+          return window.LanternfishGate.forget().then(viaSignInHost);
+        }
         status.textContent = (reasonText(err.reason) || "Access denied.") + " (" + (err.reason || err.message) + ")";
-      } else if (err.status === 401) {
-        showEnroll("This browser's key was not accepted. It may have been revoked. Enroll again with a new ticket.");
-      } else {
-        status.textContent = "Sign-in failed: " + err.message;
-      }
+      });
     });
-  }, function (err) {
-    status.textContent = "Could not open key storage: " + err.message;
-  });
+  }
+
+  function signInHere() {
+    return window.LanternfishGate.hasDevice().then(function (has) {
+      if (!has) {
+        showEnroll(linkHost ? "Enroll this browser here first, then it can be linked to the application."
+          : "This browser isn't enrolled yet. Paste an enrollment ticket from Lanternfish Builder.");
+        return;
+      }
+      var why = reasonText(new URLSearchParams(location.search).get("reason") || "");
+      if (why) status.textContent = why + " Checking again…";
+      return signIn().catch(function (err) {
+        if (err.status === 403 || err.status === 503) {
+          status.textContent = (reasonText(err.reason) || "Access denied.") + " (" + (err.reason || err.message) + ")";
+        } else if (err.status === 401) {
+          showEnroll("This browser's key was not accepted. It may have been revoked. Enroll again with a new ticket.");
+        } else {
+          status.textContent = "Sign-in failed: " + err.message;
+        }
+      });
+    }, function (err) {
+      status.textContent = "Could not open key storage: " + err.message;
+    });
+  }
 })();

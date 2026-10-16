@@ -32,15 +32,21 @@ const (
 
 var webIndexPath = regexp.MustCompile(`(?i)(^|/)web/(index\.html)?$`)
 
+// wantsRenewal: a browser (cookie) page load that gets the script: Jellyfin's
+// web client page, or any HTML page of an application that asks for it.
 func (g *Gate) wantsRenewal(r *http.Request) bool {
-	return !g.cfg.DisableRenewalInjection &&
-		r.Method == http.MethodGet &&
-		webIndexPath.MatchString(r.URL.Path) &&
-		r.Header.Get(authKindHeader) == authCookie
+	a, _ := r.Context().Value(proxyAuthKey{}).(proxyAuth)
+	if g.cfg.DisableRenewalInjection || r.Method != http.MethodGet || a.how != authCookie {
+		return false
+	}
+	if a.app != nil {
+		return a.app.InjectRenewal && acceptsHTML(r)
+	}
+	return webIndexPath.MatchString(r.URL.Path)
 }
 
-// prepareRenewal asks Jellyfin for the full, uncompressed page, so the script
-// can be added to it.
+// prepareRenewal asks the upstream for the full, uncompressed page, so the
+// script can be added to it.
 func (g *Gate) prepareRenewal(out *http.Request) {
 	if !g.wantsRenewal(out) {
 		return
