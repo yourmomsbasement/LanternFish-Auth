@@ -692,6 +692,8 @@ Admin API v2 (same guard):
 | `POST /_lanternfish/admin/verify` / `link` | Dashboard re-verification `{code}`; link the key to an admin owner `{subject_id}` |
 | `GET`/`PUT /_lanternfish/admin/v2/settings` | Network settings and applications; `PUT` takes the whole document with its `version` (`409` if stale, `422` with `problems` if invalid) |
 | `POST /_lanternfish/admin/v2/settings/test-upstream` | `{url}` → whether the Gate can reach it (status, time) |
+| `GET`/`PUT /_lanternfish/admin/v2/firewall` | The Proxmox firewall plan (`GET` also returns one suggested from the network settings, and warnings) |
+| `POST /_lanternfish/admin/v2/firewall/script` | `{plan}` → `{script, filename, warnings}`: a bash script for the Proxmox host; every value is validated before it reaches the script |
 
 ## Abuse controls
 

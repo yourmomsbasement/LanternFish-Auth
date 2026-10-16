@@ -190,7 +190,8 @@ Jellyseerr, Home Assistant…):
    like Jellyfin's. Apps get hostnames, not sub-paths: most break under a path.
 2. Add the hostname to the Gate's certificate (see
    [the Proxmox guide](deploy/proxmox/README.md#adding-more-applications)).
-3. Let the Gate reach the application, and nothing else reach it.
+3. Let the Gate reach the application, and nothing else reach it: the
+   dashboard's **Firewall** tab writes the Proxmox rules for you (below).
 4. On the Network tab, *Add application*: its name, hostname, and the
    address the Gate reaches it at (`http://10.20.0.5:8989`). Optionally limit
    it to some owners. Save.
@@ -203,6 +204,24 @@ is revoked. Keep the application's own login on: the Gate decides who may
 reach it, not who they are inside it. Phone apps that talk to these
 applications with their own API keys (LunaSea, nzb360…) can't sign in to the
 Gate.
+
+### Proxmox firewall rules
+
+The **Firewall** tab describes your Proxmox layout and turns it into a script
+for the Proxmox host. It starts from the Network tab's addresses:
+
+* the Gate's container ID, LAN interface and internal address, and who may
+  SSH to it;
+* each container or VM behind it: ID, address, ports, whether the Gate reaches
+  it, which other guests it talks to (Sonarr → qBittorrent), and whether to
+  keep it off your LAN.
+
+The script writes `/etc/pve/firewall/<ID>.fw` for each guest and keeps a backup
+of any file it replaces. Each guest is limited to its own address, so a
+compromised guest can't pose as the Gate. Run it with `DRY_RUN=1` first to see
+the files. It checks, but never changes, the datacenter firewall switch and
+each NIC's `firewall=1`, because flipping those could lock you out. The tab
+also warns when an address the Gate uses isn't covered.
 
 ### Updates
 

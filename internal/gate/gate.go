@@ -343,6 +343,9 @@ func (g *Gate) routes() http.Handler {
 	mux.HandleFunc("GET /_lanternfish/admin/v2/settings", g.admin(scopeSettings, g.handleGetSettings))
 	mux.HandleFunc("PUT /_lanternfish/admin/v2/settings", g.admin(scopeSettings, g.handlePutSettings))
 	mux.HandleFunc("POST /_lanternfish/admin/v2/settings/test-upstream", g.admin(scopeSettings, g.handleTestUpstream))
+	mux.HandleFunc("GET /_lanternfish/admin/v2/firewall", g.admin(scopeSettings, g.handleGetFirewall))
+	mux.HandleFunc("PUT /_lanternfish/admin/v2/firewall", g.admin(scopeSettings, g.handlePutFirewall))
+	mux.HandleFunc("POST /_lanternfish/admin/v2/firewall/script", g.admin(scopeSettings, g.handleFirewallScript))
 
 	mux.HandleFunc("POST /_lanternfish/admin/v1/tickets", g.admin(scopeTickets, g.handleCreateTicket))
 	mux.HandleFunc("GET /_lanternfish/admin/v1/tickets", g.admin(scopeTickets, g.handleListTickets))

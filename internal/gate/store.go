@@ -179,6 +179,8 @@ type storeData struct {
 	// Settings are the network settings changed from the dashboard (nil:
 	// everything comes from the environment); see settings.go.
 	Settings *GateSettings `json:"settings,omitempty"`
+	// Firewall is the dashboard's Proxmox firewall plan (firewall.go).
+	Firewall *FirewallPlan `json:"firewall,omitempty"`
 }
 
 // maxPolicyHistory bounds stored policy versions; the ones in use are always kept.

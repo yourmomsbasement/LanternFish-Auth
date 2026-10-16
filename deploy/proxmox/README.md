@@ -180,9 +180,11 @@ the same way as Jellyfin, each on its own hostname:
 
 1. **Put it on the internal network.** Give its container an address on
    vmbr1 (e.g. `10.20.0.5`) and no address on your LAN.
-2. **Firewall it** like Jellyfin: copy `202.fw` to `/etc/pve/firewall/<CT>.fw`
-   and change the port in the `IN ACCEPT -source 10.20.0.2` rule to the
-   application's (e.g. 8989), so only the Gate reaches it.
+2. **Firewall it** like Jellyfin, so only the Gate reaches it: add it on the
+   dashboard's Firewall tab, generate the script, and run it on this host
+   (`DRY_RUN=1` first). Or by hand: copy `202.fw` to
+   `/etc/pve/firewall/<CT>.fw` and change the port in the `IN ACCEPT -source
+   10.20.0.2` rule to the application's (e.g. 8989).
 3. **DNS**: add the hostname (e.g. `sonarr.example.com`) with the same
    record as Jellyfin's.
 4. **Certificate**: add the hostname to the Gate's certificate, keeping the
@@ -281,9 +283,11 @@ pct exec 201 -- systemctl restart lanternfish-gate
    Options → Firewall: Yes). Before you do, check that Datacenter →
    Firewall still lets you reach the web UI (port 8006) and SSH from your LAN.
    Keep a console open in case it doesn't.
-2. Copy [`201.fw`](201.fw) to `/etc/pve/firewall/201.fw` and
-   [`202.fw`](202.fw) to `/etc/pve/firewall/202.fw`. Edit the admin PC
-   address in `201.fw`.
+2. Generate the rules on the dashboard's **Firewall** tab and run the script
+   on this host (`DRY_RUN=1 bash lanternfish-firewall.sh` first). Or copy
+   [`201.fw`](201.fw) to `/etc/pve/firewall/201.fw` and [`202.fw`](202.fw)
+   to `/etc/pve/firewall/202.fw` by hand, and edit the admin PC address in
+   `201.fw`.
 3. Both containers' NICs were created with `firewall=1`. Confirm under each
    CT → Network.
 

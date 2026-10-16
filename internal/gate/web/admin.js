@@ -1007,6 +1007,163 @@
     });
   };
 
+  // ---- firewall: Proxmox rules for the Gate and what's behind it ----
+
+  tabs.firewall = function () {
+    return api("GET", V2 + "firewall").then(function (data) {
+      var p = JSON.parse(JSON.stringify(data.plan || data.suggested));
+      var fresh = !data.plan;
+      p.guests = p.guests || [];
+      p.gate.ssh_from = p.gate.ssh_from || [];
+      var out = h("div"), warnBox = h("div");
+
+      function num(obj, key, attrs) {
+        var el = h("input", Object.assign({ type: "number", value: obj[key] || "" }, attrs || {}));
+        el.addEventListener("input", function () { obj[key] = Number(el.value) || 0; });
+        return el;
+      }
+      function text(obj, key, attrs) {
+        var el = h("input", Object.assign({ value: obj[key] || "" }, attrs || {}));
+        el.addEventListener("input", function () { obj[key] = el.value.trim(); });
+        return el;
+      }
+      function list(obj, key, attrs, numbers) {
+        var el = h("input", Object.assign({ value: (obj[key] || []).join(", ") }, attrs || {}));
+        el.addEventListener("input", function () {
+          var v = el.value.split(/[\s,]+/).filter(Boolean);
+          obj[key] = numbers ? v.map(Number) : v;
+        });
+        return el;
+      }
+      function check(obj, key, label, hint) {
+        var el = h("input", { type: "checkbox", checked: obj[key] });
+        el.addEventListener("change", function () { obj[key] = el.checked; });
+        return h("label", { title: hint || "" }, el, " " + label);
+      }
+      function field(label, el, hint) {
+        return h("div", { class: "field" }, h("label", { text: label }), el, hint ? h("span", { class: "muted small", text: hint }) : null);
+      }
+      function showWarnings(ws) {
+        clear(warnBox);
+        (ws || []).forEach(function (w) { add(warnBox, h("p", { class: "bad small", text: "⚠ " + w })); });
+      }
+      showWarnings(data.warnings);
+
+      var g = p.gate;
+      var gateCard = h("div", { class: "card" }, h("h2", { text: "The Gate's container" }),
+        h("div", { class: "row" },
+          field("Container ID", num(g, "id", { min: 100, placeholder: "200" })),
+          field("LAN interface", text(g, "lan_nic", { placeholder: "net0", size: "6" }), "where HTTPS arrives"),
+          field("Internal address", text(g, "internal_ip", { placeholder: "10.20.0.2", size: "14" }), "the Gate's IP on the internal network"),
+          field("Public HTTPS port", num(g, "public_port", { min: 1, max: 65535 }))),
+        h("div", { class: "row" },
+          field("Internal network", text(p, "internal_net", { placeholder: "10.20.0.0/24", size: "16" })),
+          field("SSH allowed from", list(g, "ssh_from", { placeholder: "192.168.1.10", size: "30" }), "addresses or networks; empty: no SSH"),
+          check(g, "allow_ping", "Answer ping")));
+
+      var guestBox = h("div");
+      function renderGuests() {
+        clear(guestBox);
+        if (!p.guests.length) add(guestBox, h("p", { class: "muted", text: "No guests yet." }));
+        p.guests.forEach(function (x, i) {
+          x.talks_to = x.talks_to || [];
+          x.sources = x.sources || [];
+          var kind = h("select", null, h("option", { value: "ct", text: "container (CT)" }), h("option", { value: "vm", text: "virtual machine" }));
+          kind.value = x.kind || "ct";
+          kind.addEventListener("change", function () { x.kind = kind.value; });
+          var name = text(x, "name", { placeholder: "Sonarr", maxlength: "40", size: "14" });
+          var prevName = x.name;
+          name.addEventListener("change", function () { // keep "talks to" pointing at the renamed guest
+            p.guests.forEach(function (y) {
+              y.talks_to = (y.talks_to || []).map(function (n) { return n === prevName ? x.name : n; });
+            });
+            setTimeout(renderGuests, 0); // not while the browser is still moving focus out of this field
+          });
+          var talks = h("span", { class: "days" }, p.guests.filter(function (y) { return y !== x && y.name; }).map(function (y) {
+            var c = h("input", { type: "checkbox", checked: x.talks_to.indexOf(y.name) >= 0 });
+            c.addEventListener("change", function () {
+              x.talks_to = x.talks_to.filter(function (n) { return n !== y.name; });
+              if (c.checked) x.talks_to.push(y.name);
+            });
+            return h("label", null, c, y.name);
+          }));
+          add(guestBox, h("div", { class: "card app" },
+            h("div", { class: "row" }, field("Name", name), field("Type", kind),
+              field("ID", num(x, "id", { min: 100, placeholder: "203" })),
+              field("Address", text(x, "ip", { placeholder: "10.20.0.5", size: "14" })),
+              field("Ports", list(x, "ports", { placeholder: "8989", size: "12" }, true)),
+              field("Interface", text(x, "nic", { placeholder: "net0", size: "6" })),
+              h("button", { type: "button", class: "danger", text: "Remove", onclick: function () {
+                var gone = x.name;
+                p.guests.splice(i, 1);
+                p.guests.forEach(function (y) { y.talks_to = (y.talks_to || []).filter(function (n) { return n !== gone; }); });
+                renderGuests();
+              } })),
+            h("div", { class: "row" },
+              check(x, "from_gate", "The Gate reaches it", "Jellyfin and applications behind the Gate"),
+              check(x, "block_private", "Keep it off my LAN", "It can reach the internet, but no private networks except the guests it talks to"),
+              field("Talks to", talks.childNodes.length ? talks : h("span", { class: "muted small", text: "no other guests" }), "opens their ports for it"),
+              field("Also allow from", list(x, "sources", { placeholder: "none", size: "20" }), "optional addresses or networks"))));
+        });
+      }
+      renderGuests();
+
+      function fillFromNetwork() {
+        var have = {};
+        p.guests.forEach(function (x) { have[x.ip] = true; });
+        var added = 0;
+        (data.suggested.guests || []).forEach(function (x) {
+          if (!have[x.ip]) { p.guests.push(JSON.parse(JSON.stringify(x))); added++; }
+        });
+        renderGuests();
+        flash(added ? "Added " + added + " guest(s) from the Network tab; fill in their IDs." : "Every address from the Network tab is already here.");
+      }
+
+      function save() {
+        return api("PUT", V2 + "firewall", p).then(function (r) {
+          p.version = r.version;
+          showWarnings(r.warnings);
+          flash("Firewall plan saved (version " + r.version + ").");
+        }, function (err) {
+          if (err.status === 409) flash("The plan was changed meanwhile. Reload to see it.", true);
+          else fail(err);
+        });
+      }
+      function generate() {
+        api("POST", V2 + "firewall/script", p).then(function (r) {
+          showWarnings(r.warnings);
+          clear(out);
+          var url = URL.createObjectURL(new Blob([r.script], { type: "text/x-shellscript" }));
+          add(out, h("div", { class: "card" }, h("h2", { text: "Script for the Proxmox host" }),
+            h("p", { class: "small" }, "Copy it to the Proxmox host (not the Gate) and run it as root. Try ",
+              h("code", { text: "DRY_RUN=1 bash " + r.filename }), " first: it shows the files and changes nothing."),
+            h("div", { class: "row" }, h("a", { class: "button", href: url, download: r.filename, text: "Download " + r.filename }),
+              copyButton(r.script)),
+            h("pre", { class: "script", text: r.script })));
+        }, fail);
+      }
+
+      return [
+        h("div", { class: "card" }, h("h2", { text: "Proxmox firewall" }),
+          h("p", { class: "muted small", text: "Describe the Gate's container and every container or VM behind it, then generate a script for the Proxmox host. It writes each guest's firewall so only the Gate (and the guests you choose) can reach it, and a guest can't pretend to be the Gate. Give guests static addresses." }),
+          fresh ? h("p", { class: "small", text: "Started from the Network tab's addresses. Fill in the container IDs and save." }) : null,
+          warnBox),
+        gateCard,
+        h("div", { class: "card" }, h("h2", { text: "Behind the Gate" }), guestBox,
+          h("div", { class: "row" },
+            h("button", { type: "button", class: "secondary", text: "Add guest", onclick: function () {
+              p.guests.push({ name: "", kind: "ct", id: 0, ip: "", ports: [], from_gate: true, talks_to: [], sources: [], block_private: true, nic: "net0" });
+              renderGuests();
+            } }),
+            h("button", { type: "button", class: "secondary", text: "Add from Network settings", onclick: fillFromNetwork }))),
+        h("div", { class: "row" }, h("button", { type: "button", text: "Save plan", onclick: save }),
+          h("button", { type: "button", class: "secondary", text: "Generate script", onclick: generate }),
+          p.version ? h("span", { class: "muted small", text: "Version " + p.version + ", saved " + when(p.updated_at) + " by " + p.updated_by }) : null),
+        out
+      ];
+    });
+  };
+
   // ---- security: deployment status, admin keys ----
 
   tabs.security = function () {
