@@ -957,7 +957,7 @@
       }
       if (u.status) {
         var s = u.status, cls = s.state === "succeeded" ? "ok" : (s.state === "installing" ? "" : "bad");
-        add(head, h("p", null, "Last update: ", h("strong", { class: cls, text: s.state.replace("_", " ") }),
+        add(head, h("p", null, "Last update: ", h("strong", { class: cls, text: s.state.replace(/_/g, " ") }),
           " " + s.version + " (from " + s.from + ")" + (s.requested_by ? " by " + s.requested_by : "") + ", " + when(s.at) + ". ",
           h("span", { class: "muted", text: s.message })));
       }

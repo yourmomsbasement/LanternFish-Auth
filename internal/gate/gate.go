@@ -70,6 +70,11 @@ type Config struct {
 	// (default 20 MB).
 	AuditMaxBytes int64
 
+	// ProbationPath is the updater's probation marker. While it exists (and
+	// is recent) this is a new version that may still be rolled back, so the
+	// Gate refuses changes to its data; see probation.go.
+	ProbationPath string
+
 	// Now overrides the clock in tests.
 	Now func() time.Time
 }
@@ -260,6 +265,7 @@ func New(cfg Config) (*Gate, error) {
 		},
 	}
 	g.handler = g.routes()
+	g.startProbation()
 	return g, nil
 }
 
@@ -342,6 +348,12 @@ func (g *Gate) routes() http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Strict-Transport-Security", hstsValue)
+		if g.store.readOnly.Load() && changesState(r) {
+			w.Header().Set("Retry-After", "30")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "temporarily_unavailable",
+				"reason": "update_in_progress"})
+			return
+		}
 		mux.ServeHTTP(w, r)
 	})
 }

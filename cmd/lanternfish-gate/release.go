@@ -20,7 +20,10 @@ const (
 	defaultUpdateRepo = "yourmomsbasement/LanternFish-Auth"
 	defaultKeysPath   = "/etc/lanternfish/release-keys"
 	defaultStatusPath = "/var/lib/lanternfish-update/status.json"
-	updaterUnit       = "/etc/systemd/system/lanternfish-gate-update.path"
+	// Both in the updater's own directory, which only root can write.
+	installLockPath  = "/var/lib/lanternfish-update/install.lock"
+	defaultProbation = "/var/lib/lanternfish-update/probation"
+	updaterUnit      = "/etc/systemd/system/lanternfish-gate-update.path"
 )
 
 func updateSource() (*update.Source, string) {
@@ -31,6 +34,13 @@ func updateSource() (*update.Source, string) {
 	}
 	src.Keys = keys
 	return src, ""
+}
+
+func probationPath() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	return env("LANTERNFISH_UPDATE_PROBATION", defaultProbation)
 }
 
 func requestPath() string {
@@ -137,6 +147,7 @@ func updateCmd(args []string) error {
 		BinPath: bin, PrevPath: "/usr/local/lib/lanternfish/lanternfish-gate.prev",
 		DataPath: env("LANTERNFISH_DATA", "data/gate.json"), BackupDir: "/var/lib/lanternfish-update/backups",
 		StatusPath: env("LANTERNFISH_UPDATE_STATUS", defaultStatusPath), RequestPath: requestPath(),
+		LockPath: installLockPath, ProbationPath: probationPath(),
 		Stop:    func() error { return update.Systemctl("stop", "lanternfish-gate") },
 		Start:   func() error { return update.Systemctl("start", "lanternfish-gate") },
 		Healthy: update.HealthCheck("lanternfish-gate", env("LANTERNFISH_LISTEN", ":8443")),

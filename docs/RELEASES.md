@@ -140,21 +140,32 @@ it, so tell people to update by hand (checking the download against
 
 What the updater does:
 
-1. Re-verifies the manifest signature itself (it doesn't trust the Gate's
+1. Takes `/var/lib/lanternfish-update/install.lock` for the whole update, so
+   the dashboard's request, the automatic update and the command line never
+   run at the same time; a second one waits for the first to finish.
+2. Re-verifies the manifest signature itself (it doesn't trust the Gate's
    check), and that the signed manifest is for the requested version, so an
    older signed release can't be passed off as a newer one.
-2. Refuses anything not newer than what runs (`-allow-downgrade` on the
-   command line overrides).
-3. Downloads the archive for this platform, checks its SHA-256 and size, and
+3. Refuses anything not newer than the version installed (it asks the
+   installed binary, so an update that waited can't undo a newer one;
+   `-allow-downgrade` on the command line overrides).
+4. Downloads the archive for this platform, checks its SHA-256 and size, and
    checks the new binary runs and reports the right version.
-4. Stops the Gate, backs up the data file to
+5. Stops the Gate and makes sure it has exited (it must release its data
+   file lock), backs up the data file to
    `/var/lib/lanternfish-update/backups/` (the last five are kept), keeps the
    old binary as `/usr/local/lib/lanternfish/lanternfish-gate.prev`, and
    swaps in the new one.
-5. Starts the Gate and checks it is running and answering TLS, and still is
-   15 seconds later. If not, it restores the old binary and the data file and
-   starts that again.
-6. Writes the result to `/var/lib/lanternfish-update/status.json` (shown in
+6. Starts the Gate *on probation* and checks it is running and answering
+   TLS, and still is 15 seconds later. On probation the Gate refuses every
+   change to its data with `503 update_in_progress` (enrolling, revoking,
+   publishing policies, approving new networks). Signing in and watching
+   keep working. That way a rollback, which restores the data file, can't
+   bring back a revoked device or a used ticket. If the new version is
+   unhealthy, the updater stops it, makes sure it has exited, restores the
+   old binary and the data file, starts that again, and checks that it is
+   healthy.
+7. Writes the result to `/var/lib/lanternfish-update/status.json` (shown in
    the dashboard) and sends it to `LANTERNFISH_ALERT_WEBHOOK`.
 
 The Gate itself only ever writes a request naming a version
@@ -164,6 +175,9 @@ and the dashboard can only request the newest verified release.
 ### By hand
 
 ```sh
+# status "needs_manual_recovery": the updater couldn't confirm the new Gate
+# stopped, or the restored one isn't healthy. It changed nothing it couldn't
+# confirm was safe to change; finish the rollback below.
 journalctl -u lanternfish-gate-update -n 50      # what the updater did
 cat /var/lib/lanternfish-update/status.json
 # Undo the last update yourself:
