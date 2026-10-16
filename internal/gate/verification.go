@@ -50,6 +50,7 @@ type verification struct {
 	waSession   *webauthn.SessionData
 
 	mac        *pendingMAC        // a MAC observation to record on completion
+	macStatus  string             // the signed key proof's MAC evidence (see validMACEvidence)
 	enrollment *pendingEnrollment // for purpose "enrollment"
 }
 
@@ -215,7 +216,7 @@ func (g *Gate) missingFactors(subjectID string, required []string) []string {
 }
 
 // startVerification answers a key proof that needs additional verification.
-func (g *Gate) startVerification(w http.ResponseWriter, r *http.Request, dev *Device, d decision, mac *pendingMAC, now time.Time) {
+func (g *Gate) startVerification(w http.ResponseWriter, r *http.Request, dev *Device, d decision, mac *pendingMAC, macStatus string, now time.Time) {
 	fields := map[string]any{"device_id": dev.ID, "ip": clientIP(r), "reason": d.reason, "required": d.required}
 	if missing := g.missingFactors(dev.SubjectID, d.required); len(missing) > 0 {
 		fields["missing"] = missing
@@ -229,7 +230,7 @@ func (g *Gate) startVerification(w http.ResponseWriter, r *http.Request, dev *De
 		subjectID: dev.SubjectID, ip: clientIP(r), network: d.network, geo: d.geo, policyVersion: d.pol.Version,
 		required: append([]string(nil), d.required...), done: map[string]bool{}, maxAttempts: pv.MaxFailedCodeAttempts,
 		expires: now.Add(time.Duration(pv.PendingTTLSeconds) * time.Second), fingerprint: keyFingerprint(dev.PublicKey),
-		mac: mac}
+		mac: mac, macStatus: macStatus}
 	handle := g.verifications.add(v, now)
 	if handle == "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "temporarily_unavailable", "reason": "too_many_pending_verifications"})
@@ -579,7 +580,11 @@ func (g *Gate) handleVerifyComplete(w http.ResponseWriter, r *http.Request) {
 		g.denySession(w, r, dev, d, now)
 		return
 	}
-	if d.geo.Country != v.geo.Country {
+	if d.geo.Country != v.geo.Country ||
+		!d.geo.known() && d.geoSource != unknownLocationSource(v.ip, pol.Policy.IP) {
+		// SECURITY: an unknown location is only the same if it's the same
+		// source; verifying at one unplaceable address mustn't complete at
+		// another.
 		restart("location_changed")
 		return
 	}
@@ -604,7 +609,7 @@ func (g *Gate) handleVerifyComplete(w http.ResponseWriter, r *http.Request) {
 		g.denySession(w, r, fresh, d, now)
 		return
 	}
-	mac := "unavailable"
+	mac := v.macStatus
 	if v.mac != nil {
 		mac = "verified_change"
 	}

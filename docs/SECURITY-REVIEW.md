@@ -91,6 +91,24 @@ that they came from the intended commit. If the release were tampered with
 before signing, the signature would vouch for it. Check that the release's
 workflow run built the expected commit before signing.
 
+## Adaptive authentication review (main at 8b9a5bb)
+
+A review of the factor, step-up, location, MAC and override features found
+five problems. It also carried two items forward from the previous review
+(N1, N2). None was an unauthenticated account takeover. All are fixed. Each
+regression test was checked to fail on the unfixed code, or with its fix
+taken out.
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| A1 | High | A passkey that passed the strict registration check was stored as `verified`, but the library accepts `fmt: none` (and self attestation) there without consulting the FIDO metadata. A software authenticator could satisfy `require_trusted`. | `verified` needs a certificate-chain attestation type, a non-zero AAGUID and a metadata entry the Gate confirms itself. Anything else is `not_provided` or `unverified`, and `require_trusted` refuses it. At startup, stored credentials wrongly marked `verified` are reclassified, and the network and country approvals a passkey granted those owners' devices are withdrawn. Tests use a real certificate-chain attestation fixture anchored in test metadata. |
+| A2 | Medium | A registration that had passed the setup-grant check could still save a passkey after the grant was revoked (a new setup link, owner disabled). | The body is read first (bounded in size and time). The credential is checked and saved under the grant table's lock, which revocation also takes, and only for an active owner. The lock is never held across client I/O. |
+| A3 | Medium | With IP binding off, unknown-location approvals and sessions were bound to an empty network, so verifying at one unplaceable address approved all of them. | Unknown locations bind to their own source (the network key, or the exact address when IP binding is off). That covers approvals, sessions, certificate grants and verification completion. Legacy approvals without a source no longer count. |
+| A4 | Medium | When a temporary override expired, connections it had authorized kept running. | An override's end is a hard end, like a schedule closing. Sessions, grants and stream deadlines are bounded by it, in both stream modes. |
+| A5 | Low | A step-up could produce a session without the MAC report its policy requires. | A missing or invalid required report is refused before a step-up starts. The verification carries the report's status, and session issuance (every path) checks the evidence. |
+| N1 | Medium | Lowering the approval lifetime, remembered networks or session cap didn't touch existing approvals and sessions. | Publishing applies the new limits to existing state: approvals are shortened or dropped, sessions and grants on dropped networks end, and the oldest sessions beyond the cap end. Streams are then re-judged. |
+| N2 | Low | The updater's backup read at most 256 MiB, so a larger data file would have been backed up truncated without warning. | Over the limit the update stops with an error, before anything is changed. |
+
 ## Reviewed, no change needed
 
 * **Credential handling:** tickets, admin keys and session tokens are 256-bit

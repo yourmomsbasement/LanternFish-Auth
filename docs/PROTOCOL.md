@@ -302,7 +302,9 @@ only sign in from networks it is approved for:
 
 Approvals last `approval_ttl_seconds` (1 hour to 30 days). A device keeps at
 most `remembered_networks` (1–10). When a new approval pushes one out, the
-device's sessions and streams on that network end. The address is the TCP
+device's sessions and streams on that network end. Lowering either setting,
+or `max_per_device`, applies to existing approvals and sessions as soon as
+the policy is published. The address is the TCP
 peer the Gate sees. `X-Forwarded-For` is never trusted. Behind a TCP-level
 proxy every client shares the proxy's address, so IP binding means nothing
 there.
@@ -350,7 +352,10 @@ a device wait for its owner's approval; v1 enrollment is then refused.
 * Passkeys need `LANTERNFISH_WEBAUTHN_RP_ID` and `_ORIGINS`. `attestation`:
   `none` (don't ask), `collect_if_available` (record what's offered), or
   `require_trusted` (only models the FIDO metadata service vouches for; needs
-  `LANTERNFISH_WEBAUTHN_MDS`). `allow_backup_eligible: false` refuses synced
+  `LANTERNFISH_WEBAUTHN_MDS`). "Vouches for" means certificate-chain
+  attestation (`basic_full`, `attca` or `anonca`) anchored in the metadata for
+  a model it lists. No attestation and self attestation never count, even
+  where the library accepts them. `allow_backup_eligible: false` refuses synced
   passkeys. A passkey shows that the owner approved; it doesn't identify the
   computer.
 
@@ -369,7 +374,9 @@ the actions (`deny`, `additional_verification` or `observe`):
 
 * `unknown_action`: private, unlisted and stale-database addresses are
   *unknown*, never assumed to be home. An unknown approval is tied to the
-  network it was made on.
+  network it was made on, or, with IP binding off, to the exact address. So
+  are sessions issued there: verifying at one unknown address approves no
+  other.
 * `new_country_action`: a country the device hasn't been approved in (30
   days). A device's first country is recorded without asking.
 * `exempt_networks` skip country rules (your LAN, a VPN you run).
@@ -391,7 +398,9 @@ session](#v2-session)), and stored only as an HMAC tag keyed from the master
 key. `on_change` when a reported address changes: `observe`,
 `additional_verification`, or `reenroll` (the device is suspended until an
 administrator resets or unsuspends it). `require_report` can only be set on a
-profile or device policy, never globally, and never applies to browsers. A
+profile or device policy, never globally, and never applies to browsers. It
+applies to every way of getting a session: a step-up doesn't stand in for the
+report. A
 report shows that the app reported an address; a modified client can lie.
 
 **Precedence.** A device's own policy (an *override*, set by an
@@ -399,7 +408,9 @@ administrator with a reason and optional end time) comes first, then its
 profile's, then the global policy. Revocation, a disabled owner and a
 suspended device are always checked first, and country deny lists and
 schedules are checked before any step-up, so verification never overrides a
-hard rule.
+hard rule. An override's end time is a hard end like a schedule closing: sessions
+and connections it authorized end then, in either stream mode, and the next
+request is judged under the policy that applies after it.
 
 **Upgrading.** A data file from before policies gets a default owner
 (`sub_default`) for its devices and tickets, and a global policy equal to the

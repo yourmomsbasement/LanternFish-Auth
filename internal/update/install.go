@@ -379,6 +379,10 @@ func extractBinary(archive []byte) ([]byte, error) {
 	}
 }
 
+// maxBackupSize bounds the data file the updater backs up (it is read
+// whole, as root, from a directory the Gate's user can write).
+var maxBackupSize int64 = 256 << 20
+
 func (in *Installer) backupData() (string, error) {
 	if in.DataPath == "" {
 		return "", nil
@@ -394,10 +398,15 @@ func (in *Installer) backupData() (string, error) {
 	} else if err != nil {
 		return "", err
 	}
-	data, err := io.ReadAll(io.LimitReader(f, 256<<20))
+	// SECURITY: read one byte past the limit, so a larger file fails the
+	// update instead of leaving a truncated backup that looks complete.
+	data, err := io.ReadAll(io.LimitReader(f, maxBackupSize+1))
 	f.Close()
 	if err != nil {
 		return "", err
+	}
+	if int64(len(data)) > maxBackupSize {
+		return "", fmt.Errorf("the data file is over %d MiB; not updating without a complete backup", maxBackupSize>>20)
 	}
 	if err := writeFileAtomic(dst, data, 0o600); err != nil {
 		return "", err

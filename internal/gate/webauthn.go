@@ -2,6 +2,7 @@ package gate
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/go-webauthn/webauthn/metadata/providers/memory"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/google/uuid"
 )
 
 // Passkeys and security keys (WebAuthn), through go-webauthn (pinned).
@@ -28,6 +30,7 @@ import (
 type passkeyRP struct {
 	plain  *webauthn.WebAuthn // no metadata: "none" and "collect_if_available"
 	strict *webauthn.WebAuthn // checks FIDO metadata: "require_trusted"; nil when not configured
+	mds    metadata.Provider  // strict's metadata, to confirm an authenticator is listed
 	rpID   string
 	origin []string
 	mdsErr string
@@ -75,10 +78,94 @@ func newPasskeyRP(cfg Config) (*passkeyRP, error) {
 			sc.MDS = mds
 			if rp.strict, err = webauthn.New(&sc); err != nil {
 				rp.mdsErr = err.Error()
+			} else {
+				rp.mds = mds
 			}
 		}
 	}
 	return rp, nil
+}
+
+// Attestation types backed by a certificate chain, which the strict
+// relying party checks against the FIDO metadata's trust anchors.
+// "basic_surrogate" (self attestation) and "none" carry no such chain.
+var chainAttestationTypes = map[string]bool{
+	string(metadata.BasicFull): true, string(metadata.AttCA): true, string(metadata.AnonCA): true}
+
+// attestationEvidence classifies what a registration offered, without
+// trusting it: "not_provided" (no attestation), "unverified" (some
+// statement, but nothing that could tie it to a trusted model), or
+// "chain" (a certificate-chain statement for a known authenticator model).
+func attestationEvidence(c *webauthn.Credential) string {
+	if c.AttestationFormat == "" || c.AttestationFormat == string(protocol.AttestationFormatNone) ||
+		c.AttestationType == "" || c.AttestationType == string(metadata.None) {
+		return "not_provided"
+	}
+	aaguid, err := uuid.FromBytes(c.Authenticator.AAGUID)
+	if !chainAttestationTypes[c.AttestationType] || err != nil || aaguid == uuid.Nil {
+		return "unverified"
+	}
+	return "chain"
+}
+
+// trustedAttestation reports whether a credential that the strict relying
+// party accepted really has verified provenance.
+//
+// SECURITY: the library's strict check accepts an attestation of format
+// "none" (and self attestation, and a zero AAGUID when allowed) without
+// consulting the metadata at all, so "the strict check passed" doesn't mean
+// "a trusted authenticator". Only a certificate-chain attestation for an
+// authenticator the metadata lists counts.
+func (rp *passkeyRP) trustedAttestation(c *webauthn.Credential) bool {
+	if rp.mds == nil || attestationEvidence(c) != "chain" {
+		return false
+	}
+	aaguid, _ := uuid.FromBytes(c.Authenticator.AAGUID)
+	entry, err := rp.mds.GetEntry(context.Background(), aaguid)
+	return err == nil && entry != nil
+}
+
+// repairPasskeyTrust takes "verified" away from stored credentials that
+// don't carry certificate-chain attestation (registered before the check
+// above). Network and country approvals that a passkey helped grant for
+// those owners' devices are withdrawn too, since a "require_trusted" policy
+// may have relied on the wrong verdict. It returns the owners affected.
+func repairPasskeyTrust(d *storeData) []string {
+	var owners []string
+	for _, s := range d.Subjects {
+		changed := false
+		for i := range s.Passkeys {
+			p := &s.Passkeys[i]
+			if p.AttestationResult == "verified" && attestationEvidence(&p.Credential) != "chain" {
+				p.AttestationResult = attestationEvidence(&p.Credential)
+				changed = true
+			}
+		}
+		if !changed {
+			continue
+		}
+		owners = append(owners, s.ID)
+		for _, dev := range d.Devices {
+			if dev.SubjectID != s.ID {
+				continue
+			}
+			nets := dev.Networks[:0:0]
+			for _, a := range dev.Networks {
+				if !strings.Contains(a.Method, factorWebAuthn) {
+					nets = append(nets, a)
+				}
+			}
+			dev.Networks = nets
+			countries := dev.Countries[:0:0]
+			for _, a := range dev.Countries {
+				if !strings.Contains(a.Method, factorWebAuthn) {
+					countries = append(countries, a)
+				}
+			}
+			dev.Countries = countries
+		}
+	}
+	return owners
 }
 
 // subjectUser adapts an owner for the library. The user handle is the
@@ -183,6 +270,11 @@ func (g *Gate) handleVerifyPasskeyFinish(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusServiceUnavailable, "WebAuthn isn't configured on this Gate")
 		return
 	}
+	body, err := g.readBody(w, r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed request")
+		return
+	}
 	now := g.cfg.Now()
 	handle := r.PathValue("id")
 	var v verification
@@ -199,7 +291,7 @@ func (g *Gate) handleVerifyPasskeyFinish(w http.ResponseWriter, r *http.Request)
 	}
 	pol := g.policyByVersion(v.policyVersion)
 	user, ok := g.passkeyUser(v.subjectID, pol.Policy.WebAuthn)
-	parsed, err := protocol.ParseCredentialRequestResponseBody(http.MaxBytesReader(w, r.Body, maxBody))
+	parsed, err := protocol.ParseCredentialRequestResponseBody(bytes.NewReader(body))
 	var cred *webauthn.Credential
 	if ok && err == nil {
 		cred, err = g.passkeys.plain.ValidateLogin(user, *sess, parsed)
@@ -308,6 +400,13 @@ func (g *Gate) handleSetupPasskeyOptions(w http.ResponseWriter, r *http.Request)
 
 // handleSetupPasskeyFinish registers a credential. The setup grant travels
 // in the X-Lanternfish-Grant header (the body is the credential).
+//
+// SECURITY: the body is read (bounded in size and time) before the grant is
+// looked at, and the credential is checked and saved under the grant table's
+// lock, which revocation also takes. So a grant revoked (a new setup link,
+// an owner disabled) while a request was in flight can't still register a
+// passkey: either the revocation comes first and this fails, or the passkey
+// was registered before it. The lock is never held across client I/O.
 func (g *Gate) handleSetupPasskeyFinish(w http.ResponseWriter, r *http.Request) {
 	if !g.stepRequest(w, r) {
 		return
@@ -316,86 +415,102 @@ func (g *Gate) handleSetupPasskeyFinish(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusServiceUnavailable, "WebAuthn isn't configured on this Gate")
 		return
 	}
-	now := g.cfg.Now()
-	grant := r.Header.Get("X-Lanternfish-Grant")
-	var subjectID, name string
-	var sess *webauthn.SessionData
-	if err := g.setupGrants.with(grant, now, func(sg *setupGrant) error {
-		if sg.waSession == nil {
-			return errors.New("ask for passkey options first")
-		}
-		subjectID, name, sess, sg.waSession = sg.subjectID, sg.passkeyName, sg.waSession, nil
-		return nil
-	}); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+	body, err := g.readBody(w, r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed request")
 		return
 	}
-	parsed, err := protocol.ParseCredentialCreationResponseBody(http.MaxBytesReader(w, r.Body, maxBody))
+	parsed, err := protocol.ParseCredentialCreationResponseBody(bytes.NewReader(body))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "malformed credential")
 		return
 	}
-	var user subjectUser
-	g.store.View(func(d *storeData) {
-		if s := d.Subjects[subjectID]; s != nil {
-			user = subjectUser{id: s.ID, name: s.Name}
-		}
-	})
+	now := g.cfg.Now()
+	grant := r.Header.Get("X-Lanternfish-Grant")
 	wp := g.policies.Load().global.Policy.WebAuthn
-	result := ""
+	var subjectID, name, result string
 	var cred *webauthn.Credential
-	// With FIDO metadata configured, first see whether the authenticator is
-	// one it vouches for; otherwise (or if not) record what was offered.
-	if g.passkeys.strict != nil && wp.Attestation != attNone {
-		if c, err := g.passkeys.strict.CreateCredential(user, *sess, parsed); err == nil {
-			cred, result = c, "verified"
+	errPolicy := errors.New("policy")
+	var policyDetail string
+	err = g.setupGrants.with(grant, now, func(sg *setupGrant) error {
+		if sg.waSession == nil {
+			return errors.New("ask for passkey options first")
 		}
-	}
-	if cred == nil {
-		if wp.Attestation == attRequired {
-			g.audit.write(now, "passkey_rejected", map[string]any{"subject_id": subjectID, "reason": "attestation_not_trusted"})
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "authenticator_policy_unsupported",
-				"detail": "this policy accepts only authenticators the FIDO metadata service vouches for"})
-			return
+		sess := sg.waSession
+		sg.waSession = nil // one use
+		subjectID, name = sg.subjectID, sg.passkeyName
+		var user subjectUser
+		g.store.View(func(d *storeData) {
+			if s := d.Subjects[subjectID]; s != nil {
+				user = subjectUser{id: s.ID, name: s.Name}
+			}
+		})
+		// With FIDO metadata configured, first see whether the authenticator
+		// is one it vouches for; otherwise (or if not) record what was offered.
+		if g.passkeys.strict != nil && wp.Attestation != attNone {
+			if c, err := g.passkeys.strict.CreateCredential(user, *sess, parsed); err == nil && g.passkeys.trustedAttestation(c) {
+				cred, result = c, "verified"
+			}
 		}
-		c, err := g.passkeys.plain.CreateCredential(user, *sess, parsed)
-		if err != nil {
-			g.audit.write(now, "passkey_rejected", map[string]any{"subject_id": subjectID, "reason": err.Error()})
-			writeError(w, http.StatusBadRequest, "passkey not accepted")
-			return
+		if cred == nil {
+			if wp.Attestation == attRequired {
+				policyDetail = "this policy accepts only authenticators the FIDO metadata service vouches for"
+				return errPolicy
+			}
+			c, err := g.passkeys.plain.CreateCredential(user, *sess, parsed)
+			if err != nil {
+				return fmt.Errorf("%w: %v", errPasskeyRejected, err)
+			}
+			cred, result = c, attestationEvidence(c)
+			if result == "chain" { // a chain the metadata didn't vouch for
+				result = "unverified"
+			}
 		}
-		cred, result = c, "unverified"
-		if c.AttestationType == "" || c.AttestationType == "none" || c.AttestationFormat == "none" {
-			result = "not_provided"
+		if !wp.AllowBackupEligible && cred.Flags.BackupEligible {
+			policyDetail = "this policy doesn't accept synced (backup-eligible) passkeys; use a security key or a device-bound passkey"
+			return errPolicy
 		}
-	}
-	if !wp.AllowBackupEligible && cred.Flags.BackupEligible {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "authenticator_policy_unsupported",
-			"detail": "this policy doesn't accept synced (backup-eligible) passkeys; use a security key or a device-bound passkey"})
-		return
-	}
-	if name == "" {
-		name = "Passkey " + now.Format("2006-01-02")
-	}
-	rec := WebAuthnCredential{Name: name, CreatedAt: now, AttestationResult: result, Credential: *cred}
-	if err := g.store.Update(func(d *storeData) error {
-		s := d.Subjects[subjectID]
-		if s == nil {
-			return errGrantInvalid
+		if sg.passkeys >= maxPasskeysEach {
+			return errors.New("this setup link has registered enough passkeys")
 		}
-		if len(s.Passkeys) >= maxPasskeysEach {
-			return errors.New("this owner has the maximum number of passkeys")
+		if name == "" {
+			name = "Passkey " + now.Format("2006-01-02")
 		}
-		s.Passkeys = append(s.Passkeys, rec)
+		rec := WebAuthnCredential{Name: name, CreatedAt: now, AttestationResult: result, Credential: *cred}
+		if err := g.store.Update(func(d *storeData) error {
+			s := d.Subjects[subjectID]
+			if s == nil || s.Status != "active" {
+				return errGrantInvalid
+			}
+			if len(s.Passkeys) >= maxPasskeysEach {
+				return errors.New("this owner has the maximum number of passkeys")
+			}
+			s.Passkeys = append(s.Passkeys, rec)
+			return nil
+		}); err != nil {
+			return err
+		}
+		sg.passkeys++
 		return nil
-	}); err != nil {
+	})
+	switch {
+	case errors.Is(err, errPolicy):
+		g.audit.write(now, "passkey_rejected", map[string]any{"subject_id": subjectID, "reason": policyDetail})
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "authenticator_policy_unsupported", "detail": policyDetail})
+		return
+	case errors.Is(err, errPasskeyRejected):
+		g.audit.write(now, "passkey_rejected", map[string]any{"subject_id": subjectID, "reason": err.Error()})
+		writeError(w, http.StatusBadRequest, "passkey not accepted")
+		return
+	case err != nil:
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	g.setupGrants.with(grant, now, func(sg *setupGrant) error { sg.passkeys++; return nil })
 	g.audit.write(now, "passkey_registered", map[string]any{"subject_id": subjectID, "name": name,
 		"attestation": result, "backup_eligible": cred.Flags.BackupEligible, "aaguid": fmt.Sprintf("%x", cred.Authenticator.AAGUID)})
 	g.alerts.send(fmt.Sprintf("🔑 A passkey %q was registered for owner %s", name, subjectID))
 	writeJSON(w, http.StatusCreated, map[string]any{"name": name, "attestation": result,
 		"backup_eligible": cred.Flags.BackupEligible})
 }
+
+var errPasskeyRejected = errors.New("passkey not accepted")

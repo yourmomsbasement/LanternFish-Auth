@@ -32,6 +32,16 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // overall read timeout (uploads and streams run long), so without this a
 // client could send headers, trickle or stall the body, and hold a handler
 // and connection open indefinitely without ever counting as a failure.
+// readBody reads a small request body whole, bounded in size and in time
+// like readJSON, for handlers that parse it themselves (WebAuthn).
+func (g *Gate) readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	rc := http.NewResponseController(w)
+	if err := rc.SetReadDeadline(time.Now().Add(g.cfg.BodyReadTimeout)); err == nil {
+		defer rc.SetReadDeadline(time.Time{})
+	}
+	return io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+}
+
 func (g *Gate) readJSON(w http.ResponseWriter, r *http.Request, v any) error {
 	rc := http.NewResponseController(w)
 	if err := rc.SetReadDeadline(time.Now().Add(g.cfg.BodyReadTimeout)); err == nil {

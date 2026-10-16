@@ -82,7 +82,7 @@ func (g *Gate) sessionEndpoint(w http.ResponseWriter, r *http.Request, apiVersio
 	case outAllow:
 		g.issueSession(w, r, dev, d, req.Client, macStatus, now)
 	case outVerify:
-		g.startVerification(w, r, dev, d, pending, now)
+		g.startVerification(w, r, dev, d, pending, macStatus, now)
 	default:
 		g.denySession(w, r, dev, d, now)
 	}
@@ -92,7 +92,15 @@ func (g *Gate) sessionEndpoint(w http.ResponseWriter, r *http.Request, apiVersio
 //
 // expires_at = min(now + TTL, network approval end, schedule end): a session
 // never outlives what authorized it, and a new one never extends an old one.
+//
+// SECURITY: every way to a session (a plain sign-in, or completing a
+// verification) comes through here, so the policy's prerequisites for a
+// session are checked here, whatever path led here.
 func (g *Gate) issueSession(w http.ResponseWriter, r *http.Request, dev *Device, d decision, client, mac string, now time.Time) {
+	if d.pol.Policy.MAC.RequireReport && !validMACEvidence[mac] {
+		g.denySession(w, r, dev, macRequiredDecision(dev, d), now)
+		return
+	}
 	exp := earliest(now.Add(d.pol.sessionTTL()), d.expires)
 	token := g.sessions.create(session{deviceID: dev.ID, expires: exp, network: d.network,
 		version: d.pol.Version, hardEnd: d.hardEnd, country: g.enforcedCountry(d.pol, clientIP(r), now), mac: mac},
@@ -129,6 +137,19 @@ type pendingMAC struct {
 	tag, kind, randomized string
 }
 
+// validMACEvidence are the MAC statuses that count as a valid signed report
+// (see session.mac): unchanged, first seen, a change the policy only
+// observes, or a change approved by verification.
+var validMACEvidence = map[string]bool{"matched": true, "recorded": true, "changed_observed": true, "verified_change": true}
+
+func macRequiredDecision(dev *Device, d decision) decision {
+	reason := "mac_report_required"
+	if dev.Platform == "web" {
+		reason = "mac_report_unsupported" // browsers can't; the profile is wrong for this device
+	}
+	return decision{outcome: outDeny, reason: reason, pol: d.pol, network: d.network}
+}
+
 // checkMAC handles a native client's MAC report. It returns the session's
 // MAC evidence status, a report to record after verification, and a decision
 // that overrides d (zero outcome: none).
@@ -138,13 +159,12 @@ func (g *Gate) checkMAC(dev *Device, d decision, req sessionRequest, now time.Ti
 		return "unavailable", nil, none
 	}
 	mp := d.pol.Policy.MAC
+	// A missing report is refused before a step-up too: verifying a factor
+	// doesn't stand in for a report the policy requires.
+	needed := mp.RequireReport && (d.outcome == outAllow || d.outcome == outVerify)
 	if req.MAC == nil || !mp.Collect {
-		if mp.RequireReport && d.outcome == outAllow {
-			reason := "mac_report_required"
-			if dev.Platform == "web" {
-				reason = "mac_report_unsupported" // browsers can't; the profile is wrong for this device
-			}
-			return "missing", nil, decision{outcome: outDeny, reason: reason, pol: d.pol, network: d.network}
+		if needed {
+			return "missing", nil, macRequiredDecision(dev, d)
 		}
 		return "unavailable", nil, none
 	}
@@ -154,7 +174,7 @@ func (g *Gate) checkMAC(dev *Device, d decision, req sessionRequest, now time.Ti
 	if err != nil || sigErr != nil || !validInterfaceKind(rep.InterfaceKind) ||
 		!g.verifyDevice(dev, macMessage(dev.ID, req.Challenge, rep, mac), sig) {
 		g.audit.write(now, "mac_report_rejected", map[string]any{"device_id": dev.ID})
-		if mp.RequireReport {
+		if needed {
 			return "invalid", nil, decision{outcome: outDeny, reason: "mac_report_invalid", pol: d.pol, network: d.network}
 		}
 		return "invalid", nil, none

@@ -33,6 +33,9 @@ type decision struct {
 	expires time.Time // the end of what is authorized (schedule close, approval expiry); zero: none
 	hardEnd time.Time // schedule close only (or when to re-check it); zero: none
 	geo     geoResult // when the policy uses location
+	// geoSource binds approvals for an unknown location (see
+	// unknownLocationSource).
+	geoSource string
 	// required lists the factors an outVerify decision needs.
 	required []string
 }
@@ -115,6 +118,16 @@ func (g *Gate) policyFor(dev *Device) *compiledPolicy {
 	return set.global
 }
 
+// overrideEnd is when pol stops applying to dev, if pol is dev's own
+// override and the override expires; else zero.
+func (g *Gate) overrideEnd(dev *Device, pol *compiledPolicy) time.Time {
+	set := g.policies.Load()
+	if set.overrides[dev.ID] != pol {
+		return time.Time{}
+	}
+	return set.expires[dev.ID]
+}
+
 func (g *Gate) subjectActive(id string) bool {
 	active := true
 	g.store.View(func(d *storeData) {
@@ -156,7 +169,7 @@ func (g *Gate) evaluate(dev *Device, ip string, now time.Time) decision {
 // country lists) are checked before anything verification could satisfy:
 // factors never override a hard restriction.
 func (g *Gate) evaluateAt(dev *Device, pol *compiledPolicy, ip, network string, now time.Time) decision {
-	d := decision{pol: pol, network: network}
+	d := decision{pol: pol, network: network, geoSource: unknownLocationSource(ip, pol.Policy.IP)}
 	switch {
 	case !dev.Active():
 		d.outcome, d.reason = outReenroll, "device_revoked"
@@ -174,6 +187,14 @@ func (g *Gate) evaluateAt(dev *Device, pol *compiledPolicy, ip, network string, 
 	if end, ok := pol.schedule.nextBoundary(now); ok {
 		d.hardEnd, d.expires = end, end
 	}
+	// SECURITY: a temporary override is authority that ends at a set time,
+	// like a schedule closing. Sessions, grants and open connections it
+	// authorizes end then too, in either stream mode; afterwards the fallback
+	// policy decides afresh. Otherwise a stream opened during a one-minute
+	// exception could run on indefinitely.
+	if end := g.overrideEnd(dev, pol); !end.IsZero() {
+		d.hardEnd, d.expires = earliest(d.hardEnd, end), earliest(d.expires, end)
+	}
 	stepUp := ""
 	if gp := pol.Policy.Geo; gp.Mode != geoOff && !pol.geoExempted(ip) {
 		d.geo = g.geo.lookup(ip, now)
@@ -186,7 +207,7 @@ func (g *Gate) evaluateAt(dev *Device, pol *compiledPolicy, ip, network string, 
 			case d.geo.known() && len(gp.CountryAllowlist) > 0 && !contains(gp.CountryAllowlist, c):
 				d.outcome, d.reason = outDeny, "country_not_allowed"
 				return d
-			case !d.geo.known() && !countryApproved(dev, "", network, now):
+			case !d.geo.known() && !countryApproved(dev, "", d.geoSource, now):
 				switch gp.UnknownAction {
 				case actDeny:
 					d.outcome, d.reason = outDeny, "location_unknown"
@@ -231,10 +252,11 @@ func contains(list []string, v string) bool {
 }
 
 // countryApproved: a live approval for country (or, for an unknown
-// location, for this exact network).
-func countryApproved(dev *Device, country, network string, now time.Time) bool {
+// location, for this source; see unknownLocationSource). An unknown-location
+// approval with no source (saved by an earlier version) matches nothing.
+func countryApproved(dev *Device, country, source string, now time.Time) bool {
 	for _, a := range dev.Countries {
-		if a.Country == country && now.Before(a.ExpiresAt) && (country != "" || a.Network == network) {
+		if a.Country == country && now.Before(a.ExpiresAt) && (country != "" || (a.Network != "" && a.Network == source)) {
 			return true
 		}
 	}
@@ -305,7 +327,7 @@ func (g *Gate) approveNetwork(dev *Device, ip string, d decision, method string,
 			stored.Networks = addApproval(stored.Networks, approval, pol.IP.RememberedNetworks, now)
 		}
 		if verified && pol.Geo.Mode != geoOff && d.geo.Status != "unavailable" {
-			stored.Countries = addCountry(stored.Countries, d.geo, d.network, method, d.pol.approvalTTL(), now)
+			stored.Countries = addCountry(stored.Countries, d.geo, d.geoSource, method, d.pol.approvalTTL(), now)
 		}
 		for _, a := range stored.Networks {
 			keep[a.Network] = true
@@ -365,7 +387,7 @@ func (g *Gate) noteCountry(dev *Device, d decision, now time.Time) {
 	}
 	err := g.store.Update(func(sd *storeData) error {
 		if stored := sd.Devices[dev.ID]; stored.Active() {
-			stored.Countries = addCountry(stored.Countries, d.geo, d.network, method, d.pol.approvalTTL(), now)
+			stored.Countries = addCountry(stored.Countries, d.geo, d.geoSource, method, d.pol.approvalTTL(), now)
 		}
 		return nil
 	})
@@ -406,14 +428,19 @@ type requestAuth struct {
 }
 
 // enforcedCountry is the country an address resolves to when pol enforces
-// location rules, else "" (so the check is a no-op).
+// location rules, else "" (so the check is a no-op). Sessions and
+// certificate grants are bound to it.
+//
+// SECURITY: an unknown location is "?" plus the unknown-location source, not
+// just "?": otherwise a session approved at one unplaceable address would
+// work at any other one.
 func (g *Gate) enforcedCountry(pol *compiledPolicy, ip string, now time.Time) string {
 	if pol.Policy.Geo.Mode != geoEnforce || pol.geoExempted(ip) {
 		return ""
 	}
 	r := g.geo.lookup(ip, now)
 	if !r.known() {
-		return "?"
+		return "?" + unknownLocationSource(ip, pol.Policy.IP)
 	}
 	return r.Country
 }
