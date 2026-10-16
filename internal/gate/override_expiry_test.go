@@ -61,7 +61,7 @@ func TestOverrideExpiryEndsOpenStreams(t *testing.T) {
 				}
 				timers := &recordingTimers{}
 				h.g.streams.after = timers.arm
-				auth, ctx, done := h.g.authorizeAndTrack(httptest.NewRecorder(), req)
+				auth, _, ctx, done := h.g.authorizeAndTrack(httptest.NewRecorder(), req)
 				if auth == nil {
 					t.Fatal("not authorized during the exception")
 				}
