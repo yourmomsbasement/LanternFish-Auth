@@ -1,0 +1,111 @@
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1b1f24;
+  --muted: #5b6470;
+  --accent: #b8661a;
+  --accent-text: #ffffff;
+  --border: #d7dbe0;
+  --ok: #1d7a3a;
+  --bad: #b3261e;
+  --allowed: #3f8f5a;
+  --blocked: #e4e7eb;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216;
+    --card: #181c22;
+    --text: #e6e9ed;
+    --muted: #9aa3ad;
+    --accent: #f0a050;
+    --accent-text: #1b1f24;
+    --border: #2c323a;
+    --ok: #6cc28a;
+    --bad: #ff8a80;
+    --allowed: #4fa36b;
+    --blocked: #252a31;
+  }
+}
+* { box-sizing: border-box; }
+/* display rules below would otherwise override the hidden attribute */
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 10px 16px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+}
+nav { display: flex; flex-wrap: wrap; gap: 4px; }
+nav button { background: transparent; color: var(--text); border: 1px solid transparent; }
+nav button[aria-current="page"] { border-color: var(--accent); color: var(--accent); }
+#who { margin-left: auto; color: var(--muted); font-size: 0.9rem; }
+main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+#flash { margin: 12px 16px 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); }
+#flash.error { border-color: var(--bad); color: var(--bad); }
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  overflow-x: auto;
+}
+.narrow { max-width: 420px; margin: 40px auto; display: grid; gap: 8px; }
+h1 { font-size: 1.3rem; margin: 0 0 4px; }
+h2 { font-size: 1.1rem; margin: 0 0 12px; }
+h3 { font-size: 1rem; margin: 16px 0 8px; }
+.muted { color: var(--muted); }
+.small { font-size: 0.85rem; }
+.ok { color: var(--ok); }
+.bad { color: var(--bad); }
+label { font-weight: 600; font-size: 0.9rem; }
+input, select, textarea, button { font: inherit; }
+input, select, textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  max-width: 100%;
+}
+textarea { width: 100%; min-height: 320px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.85rem; }
+button {
+  padding: 6px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-text);
+  cursor: pointer;
+}
+button.secondary { background: transparent; color: var(--accent); }
+button.danger { background: transparent; border-color: var(--bad); color: var(--bad); }
+button.link { background: none; border: none; color: var(--accent); padding: 0; }
+button:disabled { opacity: 0.5; cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { font-size: 0.8rem; color: var(--muted); font-weight: 600; }
+code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.85em; word-break: break-all; }
+.row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: end; margin-bottom: 8px; }
+.field { display: grid; gap: 2px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { display: inline-flex; gap: 4px; align-items: center; border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; font-size: 0.8rem; }
+.days label { font-weight: 400; display: inline-flex; gap: 2px; margin-right: 6px; }
+.ticket { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+@media (max-width: 640px) { .ticket { grid-template-columns: 1fr; } }
+.qr { background: #fff; padding: 8px; border-radius: 8px; width: 220px; height: 220px; }
+.week { display: grid; grid-template-columns: 3em repeat(48, minmax(4px, 1fr)); gap: 1px; font-size: 0.75rem; min-width: 480px; }
+.week span.c { height: 18px; background: var(--blocked); }
+.week span.c.on { background: var(--allowed); }
+.week .hours { grid-column: 2 / -1; display: flex; justify-content: space-between; color: var(--muted); }
+details summary { cursor: pointer; color: var(--muted); }

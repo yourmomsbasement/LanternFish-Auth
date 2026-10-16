@@ -99,6 +99,20 @@ background. The renewal script is added to the web client by
 the Jellyfin plugin, or by the Gate when the plugin doesn't (see
 [Session renewal](docs/PROTOCOL.md#session-renewal-in-the-web-client)).
 
+### Admin dashboard
+
+From a computer on an admin network (`LANTERNFISH_ADMIN_ALLOW`), open
+`https://your.host/_lanternfish/admin/` and paste an admin key. From there you
+can create enrollment tickets (with a QR code a phone can scan to enroll),
+see and revoke devices, remove their approved networks, edit and publish
+access policies with a weekly preview, manage profiles and owners, and read
+the audit log. From anywhere else the page answers `404`.
+
+The key is exchanged for a session cookie that scripts can't read, bound to
+your address, ending after 15 minutes idle or 8 hours. Every change also
+needs a per-session token, so other sites open in the same browser can't act
+through it.
+
 ### Access policy
 
 Out of the box the Gate behaves as before: 15-minute sessions, from any
