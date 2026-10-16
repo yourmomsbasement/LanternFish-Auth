@@ -109,3 +109,12 @@ code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 
 .week span.c.on { background: var(--allowed); }
 .week .hours { grid-column: 2 / -1; display: flex; justify-content: space-between; color: var(--muted); }
 details summary { cursor: pointer; color: var(--muted); }
+.detail { padding: 8px 0; }
+.detail dl, .card dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0 0 12px; }
+.detail dt, .card dt { color: var(--muted); }
+.detail dd, .card dd { margin: 0; overflow-wrap: anywhere; }
+.chip.bad { color: var(--bad); border-color: var(--bad); }
+button.small { font-size: 0.8rem; padding: 0; }
+dialog { color: var(--text); background: var(--card); border: 1px solid var(--border); max-width: min(480px, calc(100vw - 32px)); }
+dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+dialog input { width: 9em; }

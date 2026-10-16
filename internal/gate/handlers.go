@@ -392,6 +392,20 @@ type deviceView struct {
 	PolicyVersion int               `json:"policy_version"`
 	Networks      []NetworkApproval `json:"networks"`
 	LiveSessions  int               `json:"live_sessions"`
+
+	KeyFingerprint string            `json:"key_fingerprint,omitempty"`
+	Suspended      string            `json:"suspended,omitempty"`
+	Countries      []CountryApproval `json:"countries"`
+	MACs           []macView         `json:"macs"`
+	Override       *DeviceOverride   `json:"override,omitempty"`
+}
+
+// macView describes a recorded MAC without its tag.
+type macView struct {
+	InterfaceKind string    `json:"interface_kind"`
+	Randomized    string    `json:"randomized"`
+	FirstSeen     time.Time `json:"first_seen"`
+	LastSeen      time.Time `json:"last_seen"`
 }
 
 func (g *Gate) handleListDevices(w http.ResponseWriter, r *http.Request, _ *AdminKey) {
@@ -410,7 +424,17 @@ func (g *Gate) viewDevice(dev *Device, now time.Time) deviceView {
 	v := deviceView{ID: dev.ID, Name: dev.Name, Platform: dev.Platform, Kind: dev.Kind, CreatedAt: dev.CreatedAt,
 		EnrolledFrom: dev.EnrolledFrom, LastAuthAt: dev.LastAuthAt, RevokedAt: dev.RevokedAt,
 		SubjectID: dev.SubjectID, ProfileID: dev.ProfileID, PolicyVersion: g.policyFor(dev).Version,
-		Networks: []NetworkApproval{}, LiveSessions: g.sessions.count(dev.ID, now)}
+		Networks: []NetworkApproval{}, LiveSessions: g.sessions.count(dev.ID, now),
+		KeyFingerprint: keyFingerprint(dev.PublicKey), Suspended: dev.Suspended, Override: dev.Override,
+		Countries: []CountryApproval{}, MACs: []macView{}}
+	for _, c := range dev.Countries {
+		if now.Before(c.ExpiresAt) {
+			v.Countries = append(v.Countries, c)
+		}
+	}
+	for _, m := range dev.MACs {
+		v.MACs = append(v.MACs, macView{InterfaceKind: m.InterfaceKind, Randomized: m.Randomized, FirstSeen: m.FirstSeen, LastSeen: m.LastSeen})
+	}
 	for _, a := range dev.Networks {
 		if now.Before(a.ExpiresAt) {
 			v.Networks = append(v.Networks, a)

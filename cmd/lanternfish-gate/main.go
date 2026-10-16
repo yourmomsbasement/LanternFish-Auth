@@ -31,7 +31,7 @@ const usage = `Usage:
   lanternfish-gate gen-master-key [flags]    Print a new master key
       -dpapi FILE   (Windows) write it DPAPI-protected to FILE instead
       -machine      with -dpapi, protect for this machine rather than this user
-  lanternfish-gate admin-key create -name NAME
+  lanternfish-gate admin-key create -name NAME [-scopes tickets,devices,...]
   lanternfish-gate admin-key list
   lanternfish-gate admin-key revoke ID
   lanternfish-gate admin-key link ID SUBJECT  Link a key to an admin owner (dashboard re-verification)
