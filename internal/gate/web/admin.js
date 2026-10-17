@@ -9,6 +9,179 @@
   var DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
   var PLATFORMS = ["web", "android", "firetv", "webos", "tizen", "roku"];
 
+
+  // Help is text-only and shared by all settings, including dynamically added rows.
+  var settingHelp = {
+  "Admin key": "Use an admin API key to start a dashboard session. The key is cleared from the form after sign-in.",
+  "Platform": "Choose the client type that will redeem this single-use enrollment ticket.",
+  "Label": "A friendly name to help you recognize the device being enrolled.",
+  "Owner": "The person whose permissions and verification factors apply to this device.",
+  "Policy": "Choose a policy profile. Global uses the default access rules.",
+  "Valid (minutes)": "How long an unused ticket can be redeemed. It stops working after expiry or cancellation.",
+  "Public address for links": "The public HTTPS origin used in enrollment links and QR codes. This changes generated links, not the Gate listener.",
+  "Reason": "Record why you are making this change or creating this exception.",
+  "Ends (optional, your time)": "Optional expiry for the device policy override, entered in your browser’s local time.",
+  "Session length (seconds)": "How long a session credential stays valid before renewal. Shorter sessions require more frequent renewal.",
+  "Max sessions per device": "Maximum simultaneous sessions for one enrolled device.",
+  "Open streams": "Continuity lets existing streams continue after session expiry; strict closes them at expiry.",
+  "Bind sessions to the network they were issued on": "Check that a session is used from its approved address or network prefix.",
+  "Match": "Exact matches one IP address. Network prefix accepts addresses in the configured subnet.",
+  "IPv4 prefix": "Number of matching IPv4 bits. Larger values allow a smaller network; 32 matches one address.",
+  "IPv6 prefix": "Number of matching IPv6 bits. Larger values allow a smaller network; 128 matches one address.",
+  "New network": "Choose whether an unfamiliar network needs device-key proof, owner verification, or is denied.",
+  "Approval lasts (seconds)": "How long an approved network remains remembered before it needs approval again.",
+  "Networks remembered": "Maximum approved networks retained for each device.",
+  "Only allow access at scheduled times": "Limit access to the weekly windows and date range below; blackouts exclude specific intervals.",
+  "Time zone (IANA)": "The named time zone used for weekly access windows, including daylight-saving changes.",
+  "From": "Start of this weekly access window in the schedule’s time zone, inclusive.",
+  "Until": "End of this weekly window, exclusive. An end before or equal to the start continues into the next day; 24:00 means midnight.",
+  "Valid from (your time)": "Optional earliest access date, entered in your browser’s local time.",
+  "Valid until (your time)": "Optional end of the access date range, entered in your browser’s local time.",
+  "Start (your time)": "Start of the blackout interval, entered in your browser’s local time.",
+  "End (your time)": "End of the blackout interval, entered in your browser’s local time.",
+  "For a new network, country or address": "Every selected factor is required when a policy rule asks the owner to verify.",
+  "To enroll a new device": "Every selected factor is required during enrollment. Selecting none allows enrollment using the ticket and device-key proof.",
+  "Pending request lasts (seconds)": "How long the owner has to complete a pending verification request.",
+  "Wrong codes allowed": "Maximum failed code attempts before the pending verification is rejected.",
+  "Allow authenticator codes": "Allow owners to verify with time-based codes from an authenticator app.",
+  "Clock drift (30-second steps)": "Accept codes this many 30-second time steps either side of the current step.",
+  "Issue recovery codes": "Allow one-time recovery codes to recover access when normal verification is unavailable.",
+  "Allow passkeys and security keys": "Allow WebAuthn verification using registered passkeys or security keys.",
+  "Authenticator models": "Choose whether to request and validate authenticator attestation. Trusted models require the configured trust data.",
+  "PIN or biometric": "Required demands authenticator user verification. Preferred requests it without requiring support.",
+  "Accept synced passkeys (iCloud, Google…)": "Allow backup-eligible passkeys that can sync between devices.",
+  "Mode": "Off ignores location rules; record only observes; enforce applies the country restrictions and actions.",
+  "Only these countries": "Allow listed ISO country codes. Empty means no country allowlist restriction.",
+  "Never these countries": "Deny listed ISO country codes when country enforcement is enabled.",
+  "Unknown location": "Action to take when the GeoIP database cannot identify the client’s country.",
+  "Country new to the device": "Action to take when a device signs in from an unfamiliar country.",
+  "Networks exempt from country rules": "Address ranges that bypass country checks. This does not bypass other authentication rules.",
+  "Record reports": "Collect device-signed MAC address reports from clients that support them. A MAC address is not independent identity proof.",
+  "Require a report": "Require a current signed report. Browsers cannot supply one; use this only for supported native clients.",
+  "When it changes": "Choose the response when a device reports a different MAC address.",
+  "Report valid for (seconds)": "Maximum age of a MAC report before it must be refreshed.",
+  "edit as JSON": "Switch to the complete policy JSON editor. Preview and publish are still required to apply changes.",
+  "Jellyfin address": "Internal HTTP or HTTPS URL the Gate forwards Jellyfin requests to. Empty uses gate.env.",
+  "Sign-in host (Jellyfin's public name)": "Public hostname used for browser sign-in and linked application sessions. Enter a hostname, not a URL.",
+  "Admin networks (one per line: address or CIDR)": "Restrict dashboard and admin API access by source network. Keep your current address allowed. Empty uses gate.env.",
+  "Name": "A friendly name used to identify this application or guest in the dashboard.",
+  "Enabled": "Allow this application to receive authenticated traffic through the Gate after saving.",
+  "Public hostnames": "Hostnames routed to this application. Each needs DNS pointing to the Gate and valid TLS coverage.",
+  "Address behind the Gate": "Internal URL of the application, including its port. The Gate forwards authorized requests here.",
+  "Who can use it": "Everyone allows all active owners; Selected owners allows only those checked; Admins only requires an active admin owner.",
+  "Owners allowed (none ticked: no one)": "Only checked owners can reach this application. An empty selection denies everyone.",
+  "Send the public hostname": "Forward the requested public hostname to the application instead of its internal upstream hostname.",
+  "Keep browser sessions alive": "Inject the Gate renewal script into supported HTML pages so browser sessions can renew.",
+  "Send Lanternfish identity headers": "Send the device ID and signed Lanternfish identity headers to this backend. Enable for backends that need them.",
+  "Container ID": "Proxmox container ID for the Gate. The generated script targets this guest’s firewall configuration.",
+  "LAN interface": "Proxmox network interface where public HTTPS traffic reaches the Gate, such as net0.",
+  "Internal address": "The Gate’s static address on the isolated backend subnet.",
+  "Public HTTPS port": "Inbound TCP port allowed for public HTTPS access to the Gate.",
+  "Internal service port": "Private signing-service TCP port. Zero disables the firewall allowance; match the listener in gate.env.",
+  "Internal interface": "The Gate’s Proxmox interface connected to the isolated backend subnet.",
+  "Internal network": "CIDR of the isolated backend subnet. Guests should have static addresses in this network.",
+  "SSH allowed from": "Only these addresses or CIDRs may reach the Gate’s SSH port. Empty permits no SSH in the generated rules.",
+  "Answer ping": "Permit inbound ICMP ping requests to the Gate.",
+  "Additional LAN networks": "Extra CIDRs to block for isolated guests, including public IPv6 prefixes used on your LAN. Explicit allowances take precedence.",
+  "Also block link-local and multicast destinations": "Block link-local and multicast destinations for isolated guests, except explicit allowances. This can affect discovery services.",
+  "Type": "Select whether this Proxmox guest is a container or a virtual machine.",
+  "ID": "Proxmox VM or container ID. The generated script writes rules for this guest.",
+  "Address": "This guest’s static internal IP address, used for firewall rules and anti-spoofing.",
+  "Ports": "Comma-separated destination ports allowed by this rule. Include only the ports the service needs.",
+  "Interface": "Proxmox network interface on which these guest firewall rules apply.",
+  "The Gate reaches it": "Allow the Gate to connect to this guest’s listed service ports.",
+  "Internal Jellyfin service access": "Allow this backend to reach the private Jellyfin signing service. It must also be a named authorized client in gate.env.",
+  "Keep it off my LAN": "Block private-network destinations except explicit guest, signing-service, or external-target allowances. Internet traffic remains allowed.",
+  "Talks to": "Allow outbound connections to selected guests’ listed ports. This is one-way; reverse access needs a separate selection.",
+  "Also allow from": "Additional source addresses or CIDRs allowed to reach this guest’s listed ports.",
+  "Target address": "One literal IP address for an external destination such as a NAS. Hostnames and CIDRs are not accepted.",
+  "Protocol": "Transport protocol for this external-target allowance. Match the service’s TCP or UDP requirements.",
+  "Linked owner": "Associate this admin key with an active admin owner for authenticator re-verification of sensitive changes.",
+  "let it replace the authenticator app": "Allow the setup link to replace this owner’s existing authenticator registration.",
+  "show revoked": "Include devices whose access has been permanently revoked.",
+  "authenticator code": "Require an authenticator-app code as part of this verification rule.",
+  "passkey": "Require a registered passkey or security key as part of this verification rule.",
+  "Profile name": "Name this reusable policy profile. New profiles start as a copy of the global policy.",
+  "Owner name": "Name the person who will own devices and verification factors.",
+  "Role": "Owner grants ordinary device ownership. Admin identifies an administrator and can satisfy admin-only app access.",
+  "Policy scope": "Choose the global policy or a profile to edit. Publishing changes applies them to devices using that scope.",
+  "Change reason": "Explain the policy change. This reason is saved with the published policy history.",
+  "Audit filter": "Search recorded audit events, for example by event name or device ID. Refresh applies the filter.",
+  "Authenticator code": "Enter a current code from the linked admin owner’s authenticator app to confirm sensitive changes.",
+  "Policy JSON": "Edit the full policy document. Preview validates it before publishing."
+};
+  var helpSequence = 0;
+  var activeHelp = null;
+  function closeHelp() {
+    if (activeHelp) {
+      activeHelp.tip.hidden = true;
+      activeHelp.button.setAttribute("aria-expanded", "false");
+      activeHelp = null;
+    }
+  }
+  function helpButton(label, text, controls) {
+    var box = document.createElement("span");
+    box.className = "setting-help";
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "help-button";
+    button.textContent = "?";
+    button.setAttribute("aria-label", "Help: " + label);
+    button.setAttribute("aria-expanded", "false");
+    var tip = document.createElement("span");
+    tip.id = "setting-help-" + (++helpSequence);
+    tip.className = "help-tooltip";
+    tip.setAttribute("role", "tooltip");
+    tip.textContent = text;
+    tip.hidden = true;
+    button.setAttribute("aria-describedby", tip.id);
+    button.setAttribute("aria-controls", tip.id);
+    controls.forEach(function (control) {
+      var previous = control.getAttribute("aria-describedby");
+      control.setAttribute("aria-describedby", (previous ? previous + " " : "") + tip.id);
+    });
+    function show() {
+      closeHelp();
+      tip.hidden = false;
+      button.setAttribute("aria-expanded", "true");
+      activeHelp = { button: button, tip: tip };
+      var rect = button.getBoundingClientRect();
+      var width = tip.getBoundingClientRect().width;
+      tip.style.left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)) + "px";
+      var height = tip.getBoundingClientRect().height;
+      tip.style.top = Math.max(12, rect.bottom + height + 12 > window.innerHeight ? rect.top - height - 8 : rect.bottom + 8) + "px";
+    }
+    button.addEventListener("focus", show);
+    box.addEventListener("mouseenter", show);
+    box.addEventListener("mouseleave", function () { if (document.activeElement !== button) closeHelp(); });
+    button.addEventListener("blur", closeHelp);
+    button.addEventListener("click", show);
+    box.appendChild(button);
+    box.appendChild(tip);
+    return box;
+  }
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeHelp(); });
+  document.addEventListener("click", function (e) { if (!e.target.closest(".setting-help")) closeHelp(); });
+  window.addEventListener("resize", closeHelp);
+  document.addEventListener("scroll", closeHelp, true);
+  function describeField(el) {
+    var label = el.querySelector("label");
+    if (!label) return;
+    var name = label.textContent.trim();
+    var controls = Array.prototype.slice.call(el.querySelectorAll("input, select, textarea"));
+    var text = settingHelp[name];
+    if (!text) return;
+    if (controls.length === 1) {
+      if (!controls[0].id) controls[0].id = "setting-" + (++helpSequence);
+      label.htmlFor = controls[0].id;
+    }
+    var heading = document.createElement("div");
+    heading.className = "field-heading";
+    el.insertBefore(heading, label);
+    heading.appendChild(label);
+    heading.appendChild(helpButton(name, text, controls));
+  }
+
   // ---- helpers ----
 
   function h(tag, attrs) {
@@ -25,6 +198,19 @@
       });
     }
     for (var i = 2; i < arguments.length; i++) add(el, arguments[i]);
+    if (tag === "div" && el.classList.contains("field")) describeField(el);
+    if (tag === "label" && el.querySelector("input[type=checkbox]")) {
+      var name = el.textContent.trim();
+      var text = el.getAttribute("title") || settingHelp[name];
+      if (text) {
+        el.removeAttribute("title");
+        var choice = document.createElement("span");
+        choice.className = "setting-choice";
+        choice.appendChild(el);
+        choice.appendChild(helpButton(name, text, [el.querySelector("input")]));
+        return choice;
+      }
+    }
     return el;
   }
   // add(el, child, child, …): children may be nodes, text, arrays, or empty.
@@ -100,7 +286,7 @@
           msg.textContent = err.status === 429 ? "Too many wrong codes; wait a few minutes." : "Code not accepted. Try the next one.";
           msg.className = "bad small";
         });
-      } }, h("h2", { text: "Confirm it's you" }), msg, h("div", { class: "row" }, code,
+      } }, h("h2", { text: "Confirm it's you" }), msg, h("div", { class: "row" }, code, helpButton("Authenticator code", settingHelp["Authenticator code"], [code]),
         h("button", { type: "submit", text: "Confirm" }),
         h("button", { type: "button", class: "secondary", text: "Cancel", onclick: function () {
           dlg.close(); dlg.remove(); reject(new Error("Not confirmed; nothing was changed."));
@@ -147,6 +333,8 @@
   // ---- sign-in ----
 
   var signin = document.getElementById("signin");
+  var keyLabel = signin.querySelector("label");
+  keyLabel.after(helpButton("Admin key", settingHelp["Admin key"], [document.getElementById("key")]));
   function showSignIn(msg) {
     csrf = "";
     document.getElementById("nav").hidden = true;
@@ -216,6 +404,8 @@
         clear(body);
         data.devices.filter(function (d) { return showRevoked.checked || !d.revoked_at; }).forEach(function (d) {
           var prof = profileSelect(d.profile_id);
+          prof.setAttribute("aria-label", "Policy for " + d.name);
+          var profHelp = helpButton("Policy for " + d.name, settingHelp.Policy, [prof]);
           prof.disabled = !!d.revoked_at;
           prof.addEventListener("change", function () {
             api("PUT", V2 + "devices/" + encodeURIComponent(d.id) + "/profile", { profile_id: prof.value })
@@ -255,7 +445,7 @@
                 if (!detail.hidden && !detail.firstChild.firstChild) add(detail.firstChild, deviceDetail(d));
               } })),
             h("td", { text: subjectName(d.subject_id) }),
-            h("td", null, prof, h("div", { class: "muted small", text: "v" + d.policy_version })),
+            h("td", null, prof, profHelp, h("div", { class: "muted small", text: "v" + d.policy_version })),
             h("td", null, nets),
             h("td", { text: String(d.live_sessions || 0) }),
             h("td", { text: when(d.last_auth_at) }),
@@ -508,7 +698,7 @@
             w.days = DAYS.filter(function (x, j) { return days.querySelectorAll("input")[j].checked; });
             renderWeek();
           });
-          return h("label", null, c, d);
+          return h("label", { title: "Include " + d + " in this weekly access window." }, c, d);
         }));
         var start = h("input", { type: "time", value: w.start, step: "60" });
         var end = h("input", { value: w.end, size: "5", placeholder: "HH:MM", pattern: "[0-2][0-9]:[0-5][0-9]", title: "HH:MM, or 24:00 for midnight at the end of the day" });
@@ -671,6 +861,15 @@
     renderWindows();
     renderBlackouts();
     renderSchedule();
+    // Each policy category has its own boundary, without changing its controls.
+    var section;
+    Array.prototype.slice.call(root.childNodes).forEach(function (node) {
+      if (node.nodeName === "H3") {
+        section = h("section", { class: "settings-section" });
+        root.appendChild(section);
+      }
+      if (section) section.appendChild(node);
+    });
     return { el: root, value: function () { return p; } };
   }
 
@@ -685,6 +884,7 @@
       var holder = h("div"), meta = h("p", { class: "muted small" }), previewBox = h("div"), form = null;
       var jsonMode = h("input", { type: "checkbox" });
       var json = h("textarea", { spellcheck: "false", "aria-label": "Policy JSON" });
+      var jsonHelp = helpButton("Policy JSON", settingHelp["Policy JSON"], [json]);
       var reason = h("input", { placeholder: "why (recorded in the history)", size: "40", maxlength: "64" });
       var current = null;
 
@@ -693,7 +893,7 @@
         clear(holder); clear(previewBox);
         form = policyForm(policy);
         json.value = JSON.stringify(policy, null, 2);
-        add(holder, jsonMode.checked ? json : form.el);
+        add(holder, jsonMode.checked ? [jsonHelp, json] : form.el);
       }
       function value() {
         if (jsonMode.checked) return JSON.parse(json.value);
@@ -713,7 +913,7 @@
           else form = policyForm(JSON.parse(json.value));
         } catch (e) { flash("The JSON isn't valid: " + e.message, true); jsonMode.checked = !jsonMode.checked; return; }
         clear(holder);
-        add(holder, jsonMode.checked ? json : form.el);
+        add(holder, jsonMode.checked ? [jsonHelp, json] : form.el);
       });
 
       function preview() {
@@ -768,14 +968,14 @@
 
       select();
       return h("div", { class: "card" },
-        h("div", { class: "row" }, h("h2", { text: "Access policy" }), scopeSel,
+        h("div", { class: "row" }, h("h2", { text: "Access policy" }), h("div", { class: "field" }, h("label", { text: "Policy scope" }), scopeSel),
           h("button", { type: "button", class: "secondary", text: "Load recommended", onclick: function () {
             api("GET", V2 + "policy/recommended").then(function (r) { load(r.policy); flash("Recommended policy loaded; review and publish."); }, fail);
           } }),
           h("label", { class: "small" }, jsonMode, " edit as JSON")),
         meta, holder,
         h("div", { class: "row" }, h("button", { type: "button", class: "secondary", text: "Preview", onclick: preview }),
-          reason, h("button", { type: "button", text: "Publish", onclick: publish })),
+          h("div", { class: "field" }, h("label", { text: "Change reason" }), reason), h("button", { type: "button", text: "Publish", onclick: publish })),
         previewBox, histBox);
     });
   };
@@ -788,7 +988,7 @@
       h("form", { class: "card", onsubmit: function (e) {
         e.preventDefault();
         api("POST", V2 + "profiles", { name: name.value }).then(function () { flash("Profile created as a copy of the global policy. Edit it on the Policy tab."); reload(); }, fail);
-      } }, h("h2", { text: "New profile" }), h("div", { class: "row" }, name, h("button", { type: "submit", text: "Create" }))),
+      } }, h("h2", { text: "New profile" }), h("div", { class: "row" }, h("div", { class: "field" }, h("label", { text: "Profile name" }), name), h("button", { type: "submit", text: "Create" }))),
       h("div", { class: "card" }, h("h2", { text: "Profiles" }), cache.profiles.length ? h("table", null,
         h("thead", null, h("tr", null, ["Name", "Devices", "Policy version", "Created", ""].map(function (t) { return h("th", { text: t }); }))),
         h("tbody", null, cache.profiles.map(function (p) {
@@ -814,7 +1014,7 @@
       h("form", { class: "card", onsubmit: function (e) {
         e.preventDefault();
         api("POST", V2 + "subjects", { name: name.value, role: role.value }).then(function () { flash("Owner created."); reload(); }, fail);
-      } }, h("h2", { text: "New owner" }), h("div", { class: "row" }, name, role, h("button", { type: "submit", text: "Create" }))),
+      } }, h("h2", { text: "New owner" }), h("div", { class: "row" }, h("div", { class: "field" }, h("label", { text: "Owner name" }), name), h("div", { class: "field" }, h("label", { text: "Role" }), role), h("button", { type: "submit", text: "Create" }))),
       h("div", { class: "card" }, h("h2", { text: "Owners" }), h("p", { class: "muted small", text: "Turning an owner off ends their devices' sessions and streams at once and blocks sign-in until turned back on." }),
         h("table", null, h("thead", null, h("tr", null, ["Name", "Role", "Status", "Created", ""].map(function (t) { return h("th", { text: t }); }))),
           h("tbody", null, cache.subjects.map(function (s) {
@@ -969,7 +1169,7 @@
               a.owners = a.owners.filter(function (x) { return x !== o.id; });
               if (c.checked) a.owners.push(o.id);
             });
-            return h("label", null, c, o.name);
+            return h("label", { title: "Allow " + o.name + " to reach this application when Selected owners is active." }, c, o.name);
           }));
           add(appBox, h("div", { class: "card app" },
             h("div", { class: "row" },
@@ -1110,7 +1310,7 @@
               x.talks_to = x.talks_to.filter(function (n) { return n !== y.name; });
               if (c.checked) x.talks_to.push(y.name);
             });
-            return h("label", null, c, y.name);
+            return h("label", { title: "Allow this guest to connect to " + y.name + " on its listed ports. Reverse access requires its own rule." }, c, y.name);
           }));
           // External targets: a NAS, for example. Outbound only, one literal
           // address each, with an explicit protocol and ports.
@@ -1292,7 +1492,7 @@
     }
     q.addEventListener("change", load);
     load();
-    return Promise.resolve(h("div", { class: "card" }, h("div", { class: "row" }, h("h2", { text: "Audit log" }), q,
+    return Promise.resolve(h("div", { class: "card" }, h("div", { class: "row" }, h("h2", { text: "Audit log" }), h("div", { class: "field" }, h("label", { text: "Audit filter" }), q),
       h("button", { class: "secondary", text: "Refresh", onclick: load })), box));
   };
 

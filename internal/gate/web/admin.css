@@ -121,3 +121,45 @@ dialog input { width: 9em; }
 textarea.short { min-height: 0; height: auto; width: min(32em, 100%); }
 pre.script { max-height: 480px; overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 0.8rem; white-space: pre; }
 a.button { display: inline-block; padding: 6px 14px; border-radius: 6px; background: var(--accent); color: var(--accent-text); text-decoration: none; }
+
+/* Setting groups keep related controls together and separate independent rules. */
+main { padding: 24px; }
+.card { padding: 24px; margin-bottom: 24px; border-radius: 14px; }
+.card.app { border-left: 4px solid var(--accent); margin-top: 20px; }
+h1 { margin-bottom: 12px; }
+h2 { margin-bottom: 16px; }
+.row { gap: 20px 24px; margin-bottom: 20px; align-items: flex-start; }
+.row:last-child { margin-bottom: 0; }
+.field { gap: 8px; min-width: 0; max-width: 100%; }
+.field > .muted { max-width: 40em; }
+.field-heading { display: flex; align-items: center; gap: 8px; }
+input:not([type=checkbox]), select { min-height: 40px; }
+input[type=checkbox] { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--accent); }
+button { min-height: 38px; }
+button.link, button.small { min-height: auto; }
+.settings-section { padding: 24px 0; border-top: 1px solid var(--border); }
+.settings-section > h3 { margin-top: 0; margin-bottom: 16px; }
+.settings-section > p { max-width: 70em; }
+.settings-section h3:not(:first-child) { margin-top: 24px; }
+.setting-choice { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.setting-choice > label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.days { display: flex; flex-wrap: wrap; gap: 8px; }
+.days label { margin: 0; gap: 6px; }
+.setting-help { display: inline-flex; align-items: center; flex: 0 0 auto; }
+button.help-button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; min-height: 28px; padding: 0; border-radius: 50%; border: 1px solid var(--border); color: var(--muted); background: var(--card); font-size: 0.85rem; font-weight: 700; }
+button.help-button:hover, button.help-button[aria-expanded=true] { border-color: var(--accent); color: var(--accent); }
+.help-tooltip { position: fixed; z-index: 1000; width: max-content; max-width: min(340px, calc(100vw - 24px)); padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--text); box-shadow: 0 6px 24px #0003; font-size: 0.9rem; font-weight: 400; line-height: 1.5; text-align: left; overflow-wrap: anywhere; pointer-events: auto; }
+th, td { padding: 12px; }
+td > .setting-help { margin-left: 8px; }
+#signin { grid-template-columns: 1fr auto; gap: 12px; }
+#signin > h1, #signin > p, #signin > input, #signin > button { grid-column: 1 / -1; }
+@media (max-width: 640px) {
+  main { padding: 12px; }
+  .card { padding: 16px; margin-bottom: 20px; }
+  .row { gap: 16px; }
+  .row > .field { flex: 1 1 100%; }
+  .field > input, .field > select, .field > textarea { width: 100%; }
+  .settings-section { padding: 20px 0; }
+  .detail dl, .card dl { grid-template-columns: 1fr; gap: 4px; }
+  .detail dd, .card dd { margin-bottom: 12px; }
+}
