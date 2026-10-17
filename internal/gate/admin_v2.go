@@ -141,6 +141,7 @@ func (g *Gate) handlePreviewPolicy(w http.ResponseWriter, r *http.Request, _ *Ad
 	}
 	// Factors the owners in scope would need but haven't set up.
 	needed := append(append([]string{}, cp.Policy.Verification.NewNetworkRequiredAll...), cp.Policy.Verification.EnrollmentRequiredAll...)
+	needed = mergeFactors(needed, cp.Policy.Verification.ReauthenticateRequiredAll)
 	if len(needed) > 0 {
 		owners := map[string]bool{}
 		g.store.View(func(d *storeData) {

@@ -14,19 +14,20 @@ import (
 // Device is an enrolled client. PublicKey is the device's SPKI (ECDSA kind);
 // SealedSecret is its HMAC secret sealed under the master key (Roku).
 type Device struct {
-	JellyfinEnrollment *JellyfinEnrollment `json:"jellyfin_enrollment,omitempty"`
-	JellyfinUserID     string              `json:"jellyfin_user_id,omitempty"`
-	JellyfinSetupState string              `json:"jellyfin_setup_state,omitempty"`
-	ID                 string              `json:"id"`
-	Name               string              `json:"name"`
-	Platform           string              `json:"platform"`
-	Kind               string              `json:"kind"`
-	PublicKey          []byte              `json:"public_key,omitempty"`
-	SealedSecret       string              `json:"sealed_secret,omitempty"`
-	CreatedAt          time.Time           `json:"created_at"`
-	EnrolledFrom       string              `json:"enrolled_from"`
-	LastAuthAt         *time.Time          `json:"last_auth_at,omitempty"`
-	RevokedAt          *time.Time          `json:"revoked_at,omitempty"`
+	FactorVerifiedAt   map[string]time.Time `json:"factor_verified_at,omitempty"`
+	JellyfinEnrollment *JellyfinEnrollment  `json:"jellyfin_enrollment,omitempty"`
+	JellyfinUserID     string               `json:"jellyfin_user_id,omitempty"`
+	JellyfinSetupState string               `json:"jellyfin_setup_state,omitempty"`
+	ID                 string               `json:"id"`
+	Name               string               `json:"name"`
+	Platform           string               `json:"platform"`
+	Kind               string               `json:"kind"`
+	PublicKey          []byte               `json:"public_key,omitempty"`
+	SealedSecret       string               `json:"sealed_secret,omitempty"`
+	CreatedAt          time.Time            `json:"created_at"`
+	EnrolledFrom       string               `json:"enrolled_from"`
+	LastAuthAt         *time.Time           `json:"last_auth_at,omitempty"`
+	RevokedAt          *time.Time           `json:"revoked_at,omitempty"`
 	// SubjectID is the device's owner; ProfileID its assigned policy profile
 	// ("" uses the global policy).
 	SubjectID string `json:"subject_id,omitempty"`

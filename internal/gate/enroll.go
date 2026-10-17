@@ -114,6 +114,9 @@ var (
 // first country). Nothing is issued unless that save succeeds.
 func (g *Gate) activateEnrollment(w http.ResponseWriter, r *http.Request, pe *pendingEnrollment, verified string, now time.Time) *enrollResponse {
 	dev := *pe.dev
+	if verified != "" {
+		recordFactorVerification(&dev, strings.Split(verified, "+"), now)
+	}
 	fields := map[string]any{"ticket_id": pe.ticket.ID, "platform": pe.ticket.Platform}
 	resp := &enrollResponse{DeviceID: dev.ID, Kind: dev.Kind}
 	var secret []byte

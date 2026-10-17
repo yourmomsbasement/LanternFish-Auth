@@ -23,6 +23,7 @@
   }
 
   var REASONS = {
+    reauthentication_required: "Your policy requires you to verify again because the authentication interval has elapsed.",
     network_changed: "This device is signing in from a network it isn't approved for.",
     new_device: "A new device is being added for this owner.",
     new_country: "This device is signing in from a new country.",

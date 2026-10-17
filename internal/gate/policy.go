@@ -31,6 +31,9 @@ type Policy struct {
 // Every listed factor is required (WebAuthn AND authenticator code, never
 // one standing in for the other).
 type VerificationPolicy struct {
+	// ReauthenticateAfterSeconds bounds factor authentication age, independent of key/session renewal. Zero disables it.
+	ReauthenticateAfterSeconds int      `json:"reauthenticate_after_seconds"`
+	ReauthenticateRequiredAll  []string `json:"reauthenticate_required_all"`
 	// NewNetworkRequiredAll: factors for a device on a network it isn't
 	// approved for (ip.on_change "additional_verification"), and for the geo
 	// and MAC rules whose action is "additional_verification".
@@ -188,6 +191,9 @@ func (p *Policy) normalize() {
 	}
 	if v.MaxFailedCodeAttempts == 0 {
 		v.MaxFailedCodeAttempts = 5
+	}
+	if v.ReauthenticateRequiredAll == nil {
+		v.ReauthenticateRequiredAll = []string{}
 	}
 	if v.NewNetworkRequiredAll == nil {
 		v.NewNetworkRequiredAll = []string{}
@@ -387,6 +393,13 @@ func (p *Policy) Validate() error {
 	vp := p.Verification
 	checkFactors("verification.new_network_required_all", vp.NewNetworkRequiredAll)
 	checkFactors("verification.enrollment_required_all", vp.EnrollmentRequiredAll)
+	checkFactors("verification.reauthenticate_required_all", vp.ReauthenticateRequiredAll)
+	if vp.ReauthenticateAfterSeconds < 0 || vp.ReauthenticateAfterSeconds > 31536000 {
+		bad("verification.reauthenticate_after_seconds must be between 0 and 31536000")
+	}
+	if vp.ReauthenticateAfterSeconds > 0 && len(vp.ReauthenticateRequiredAll) == 0 {
+		bad("periodic reauthentication requires at least one factor")
+	}
 	if vp.PendingTTLSeconds < 60 || vp.PendingTTLSeconds > 900 {
 		bad("verification.pending_ttl_seconds must be between 60 and 900")
 	}

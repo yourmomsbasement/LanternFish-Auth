@@ -78,6 +78,7 @@ func (g *Gate) sessionEndpoint(w http.ResponseWriter, r *http.Request, apiVersio
 	if md.outcome != "" {
 		d = md
 	}
+	d = g.reauthenticationDecision(dev, d, now)
 	switch d.outcome {
 	case outAllow:
 		g.issueSession(w, r, dev, d, req.Client, macStatus, now)

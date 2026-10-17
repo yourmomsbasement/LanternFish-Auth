@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -171,7 +172,8 @@ func (g *Gate) evaluate(dev *Device, ip string, now time.Time) decision {
 // evaluateAt applies pol. Hard restrictions (revocation, owner, schedule,
 // country lists) are checked before anything verification could satisfy:
 // factors never override a hard restriction.
-func (g *Gate) evaluateAt(dev *Device, pol *compiledPolicy, ip, network string, now time.Time) decision {
+func (g *Gate) evaluateAt(dev *Device, pol *compiledPolicy, ip, network string, now time.Time) (result decision) {
+	defer func() { result = g.reauthenticationDecision(dev, result, now) }()
 	d := decision{pol: pol, network: network, geoSource: unknownLocationSource(ip, pol.Policy.IP)}
 	switch {
 	case !dev.Active():
@@ -290,7 +292,7 @@ func (g *Gate) authorizeKeyProof(dev *Device, ip string, now time.Time) decision
 			dev = fresh
 			d = g.evaluate(dev, ip, now)
 		case onChangeVerify:
-			d.outcome, d.reason, d.required = outVerify, "network_changed", d.pol.Policy.Verification.NewNetworkRequiredAll
+			d.outcome, d.reason, d.required = outVerify, "network_changed", mergeFactors(d.required, d.pol.Policy.Verification.NewNetworkRequiredAll)
 			return d
 		default:
 			d.outcome, d.reason = outDeny, "network_changed"
@@ -325,6 +327,9 @@ func (g *Gate) approveNetwork(dev *Device, ip string, d decision, method string,
 		stored := sd.Devices[dev.ID]
 		if !stored.Active() {
 			return errDeviceGone
+		}
+		if verified {
+			recordFactorVerification(stored, strings.Split(method, "+"), now)
 		}
 		if pol.IP.Enabled {
 			stored.Networks = addApproval(stored.Networks, approval, pol.IP.RememberedNetworks, now)
@@ -470,6 +475,11 @@ func (g *Gate) authorizeRequest(w http.ResponseWriter, r *http.Request) *request
 			}
 		}
 		pol := g.policyFor(certDev)
+		freshDecision := g.reauthenticationDecision(certDev, decision{pol: pol, outcome: outAllow}, now)
+		if freshDecision.outcome == outVerify {
+			g.denyRequest(w, r, freshDecision)
+			return nil
+		}
 		network := networkKey(ip, pol.Policy.IP)
 		// A cached grant still needs an active owner (defence in depth: a
 		// disable drops grants too), and the country it was issued in.
@@ -510,6 +520,11 @@ func (g *Gate) authorizeRequest(w http.ResponseWriter, r *http.Request) *request
 		return nil
 	}
 	pol := g.policyFor(dev)
+	freshDecision := g.reauthenticationDecision(dev, decision{pol: pol, outcome: outAllow}, now)
+	if freshDecision.outcome == outVerify {
+		g.denyRequest(w, r, freshDecision)
+		return nil
+	}
 	network := networkKey(ip, pol.Policy.IP)
 	// SECURITY: a session bound to one network is only good there. From
 	// anywhere else the device must prove its key again (and the policy then

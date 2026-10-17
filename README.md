@@ -298,3 +298,7 @@ and invitations can optionally authorize a recipient to create a Jellyfin
 account with administrator-selected libraries and permissions. See
 [Email enrollment and Jellyfin accounts](docs/email-enrollment.md) for setup,
 security boundaries, failure handling and API details.
+
+Policies can require fresh authenticator or passkey verification after a
+configurable interval, independently of session renewal. See
+[Periodic reauthentication](docs/reauthentication.md).
