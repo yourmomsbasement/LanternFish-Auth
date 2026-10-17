@@ -2,6 +2,9 @@ package gate
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"html"
 	"io"
 	"net/http"
 	"regexp"
@@ -57,10 +60,8 @@ func (g *Gate) prepareRenewal(out *http.Request) {
 }
 
 func (g *Gate) injectRenewal(resp *http.Response) error {
-	if resp.Header.Get(renewalHeader) != "" {
-		resp.Header.Del(renewalHeader) // the plugin already added it
-		return nil
-	}
+	pluginInjected := resp.Header.Get(renewalHeader) != ""
+	resp.Header.Del(renewalHeader)
 	if resp.Request == nil || !g.wantsRenewal(resp.Request) ||
 		resp.StatusCode != http.StatusOK ||
 		!strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") ||
@@ -79,7 +80,21 @@ func (g *Gate) injectRenewal(resp *http.Response) error {
 		return nil
 	}
 	resp.Body.Close()
-	if i := bytes.Index(asciiLower(body), []byte("</head>")); i >= 0 &&
+	a, _ := resp.Request.Context().Value(proxyAuthKey{}).(proxyAuth)
+	if a.app == nil && webIndexPath.MatchString(resp.Request.URL.Path) {
+		build := g.jellyfinCacheBuild(body)
+		cookie, err := resp.Request.Cookie(jellyfinCacheCookie)
+		if err != nil || cookie.Value != build {
+			body = []byte(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Preparing Jellyfin</title></head><body><p id="status">Preparing Jellyfin after an update…</p><button id="retry" hidden>Retry</button><script src="/_lanternfish/jellyfin-cache.js" data-build="` + html.EscapeString(build) + `"></script></body></html>`)
+			resp.Header.Set("Content-Security-Policy", pageCSP)
+			resp.Header.Set("Referrer-Policy", "no-referrer")
+		}
+		// Always obtain a fresh entry page; hashed application assets remain cacheable.
+		resp.Header.Set("Cache-Control", "no-store")
+		resp.Header.Del("ETag")
+		resp.Header.Del("Last-Modified")
+	}
+	if i := bytes.Index(asciiLower(body), []byte("</head>")); !pluginInjected && !bytes.Contains(body, []byte("/_lanternfish/jellyfin-cache.js")) && i >= 0 &&
 		!bytes.Contains(body, []byte("/_lanternfish/gate-client.js")) {
 		body = append(body[:i:i], append([]byte(renewalScript), body[i:]...)...)
 		resp.Header.Del("ETag")
@@ -101,4 +116,23 @@ func asciiLower(b []byte) []byte {
 		out[i] = c
 	}
 	return out
+}
+
+const jellyfinCacheCookie = "lf_jellyfin_cache_build"
+
+var jellyfinScriptSources = regexp.MustCompile(`(?i)<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']`)
+
+// Gate upgrades and changes to Jellyfin's script bundles invalidate query state.
+// Ignore our renewal script, which may be inserted by either side of the proxy.
+func (g *Gate) jellyfinCacheBuild(body []byte) string {
+	sum := sha256.New()
+	sum.Write([]byte("jellyfin-query-cache/v1\n" + g.cfg.Version + "\n"))
+	for _, match := range jellyfinScriptSources.FindAllSubmatch(body, -1) {
+		src := string(match[1])
+		if strings.Contains(src, "/_lanternfish/gate-client.js") {
+			continue
+		}
+		sum.Write([]byte(src + "\n"))
+	}
+	return hex.EncodeToString(sum.Sum(nil))
 }

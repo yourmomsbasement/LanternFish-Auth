@@ -302,3 +302,7 @@ security boundaries, failure handling and API details.
 Policies can require fresh authenticator or passkey verification after a
 configurable interval, independently of session renewal. See
 [Periodic reauthentication](docs/reauthentication.md).
+
+Jellyfin web query state is invalidated selectively across Gate/frontend upgrades,
+while enrollment keys and login data are preserved. See
+[Jellyfin query cache compatibility](docs/jellyfin-query-cache.md).

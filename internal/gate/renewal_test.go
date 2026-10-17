@@ -42,7 +42,7 @@ func fakeWeb(plugin bool) http.HandlerFunc {
 func (h *harness) cookieSession(t *testing.T) string {
 	t.Helper()
 	key, enr := h.enrollECDSA("web")
-	return "lf_session=" + h.signIn(enr.DeviceID, func(m []byte) []byte { return rawSign(key, m) })
+	return "lf_session=" + h.signIn(enr.DeviceID, func(m []byte) []byte { return rawSign(key, m) }) + "; " + jellyfinCacheCookie + "=" + h.g.jellyfinCacheBuild([]byte(testIndex))
 }
 
 func TestRenewalInjectedForCookieSessions(t *testing.T) {
@@ -142,3 +142,45 @@ func TestCompressedIndexPassesThrough(t *testing.T) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+func TestJellyfinCachePreparationPrecedesApplication(t *testing.T) {
+	for _, plugin := range []bool{false, true} {
+		t.Run(strconv.FormatBool(plugin), func(t *testing.T) {
+			h := newHarness(t)
+			h.respond = fakeWeb(plugin)
+			cookie := strings.Split(h.cookieSession(t), ";")[0]
+			r := h.do("GET", "/web/", nil, map[string]string{"Cookie": cookie})
+			if r.Code != 200 || !strings.Contains(r.Body.String(), "/_lanternfish/jellyfin-cache.js") || strings.Contains(r.Body.String(), renewalScript) {
+				t.Fatal("application loaded before cache preparation", r.Body.String())
+			}
+			if r.Header().Get("Cache-Control") != "no-store" || r.Header().Get("ETag") != "" {
+				t.Fatal("maintenance page cached")
+			}
+			build := h.g.jellyfinCacheBuild([]byte(testIndex))
+			if !strings.Contains(r.Body.String(), `data-build="`+build+`"`) {
+				t.Fatal("missing build marker")
+			}
+			r = h.do("GET", "/web/", nil, map[string]string{"Cookie": cookie + "; " + jellyfinCacheCookie + "=" + build})
+			if strings.Contains(r.Body.String(), "jellyfin-cache.js") || strings.Count(r.Body.String(), renewalScript) != 1 {
+				t.Fatal("prepared browser did not load application", r.Body.String())
+			}
+			h.g.cfg.Version = "next-build"
+			r = h.do("GET", "/web/", nil, map[string]string{"Cookie": cookie + "; " + jellyfinCacheCookie + "=" + build})
+			if !strings.Contains(r.Body.String(), "jellyfin-cache.js") {
+				t.Fatal("Gate upgrade did not invalidate cache")
+			}
+		})
+	}
+}
+func TestJellyfinCacheBuildTracksFrontendAssets(t *testing.T) {
+	h := newHarness(t)
+	a := []byte(`<script defer src="/web/app.123.js"></script>`)
+	b := []byte(`<script defer src="/web/app.456.js"></script>`)
+	if h.g.jellyfinCacheBuild(a) == h.g.jellyfinCacheBuild(b) {
+		t.Fatal("frontend upgrade did not invalidate cache")
+	}
+	withRenewal := append(append([]byte{}, a...), []byte(renewalScript)...)
+	if h.g.jellyfinCacheBuild(a) != h.g.jellyfinCacheBuild(withRenewal) {
+		t.Fatal("plugin renewal injection caused cache invalidation loop")
+	}
+}

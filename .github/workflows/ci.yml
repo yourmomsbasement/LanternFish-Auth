@@ -21,11 +21,17 @@ jobs:
       - name: Install browser test runtime
         run: |
           npm install --prefix /tmp/lanternfish-browser --no-save --package-lock=false playwright@1.62.1
-          node /tmp/lanternfish-browser/node_modules/playwright/cli.js install --with-deps chromium
+          node /tmp/lanternfish-browser/node_modules/playwright/cli.js install --with-deps chromium firefox
       - name: Render Tickets and Email with mocked APIs
         env:
           NODE_PATH: /tmp/lanternfish-browser/node_modules
         run: node scripts/test-admin-render.cjs
+      - name: Query cache upgrades (Chromium and Firefox)
+        env:
+          NODE_PATH: /tmp/lanternfish-browser/node_modules
+        run: |
+          node scripts/test-jellyfin-cache.cjs
+          BROWSER=firefox node scripts/test-jellyfin-cache.cjs
 
   gate:
     name: Gate (Go)

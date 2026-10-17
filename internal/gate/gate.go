@@ -395,6 +395,7 @@ func (g *Gate) routes() http.Handler {
 	mux.HandleFunc("POST /_lanternfish/admin/v2/update", g.admin(scopeUpdates, g.handleRequestUpdate))
 
 	mux.HandleFunc("GET /_lanternfish/{$}", g.serveStatic("index.html"))
+	mux.HandleFunc("GET /_lanternfish/jellyfin-cache.js", g.serveStatic("jellyfin-cache.js"))
 	mux.HandleFunc("GET /_lanternfish/gate-client.js", g.serveStatic("gate-client.js"))
 	mux.HandleFunc("GET /_lanternfish/login.js", g.serveStatic("login.js"))
 	mux.HandleFunc("GET /_lanternfish/style.css", g.serveStatic("style.css"))
