@@ -375,3 +375,60 @@ func TestJellyfinLibrariesRequireGateSignatureAndAPIKey(t *testing.T) {
 		}
 	}
 }
+
+func TestJellyfinSettingsValidateBeforeSave(t *testing.T) {
+	h := newHarness(t)
+	pub, _ := x509.MarshalPKIXPublicKey(&h.g.upstream.PublicKey)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !verifyUpstream(t, pub, r) {
+			t.Error("validation request unsigned")
+			w.WriteHeader(403)
+			return
+		}
+		switch r.Header.Get("X-Emby-Token") {
+		case "good-key":
+			io.WriteString(w, `[]`)
+		case "wrong-response":
+			io.WriteString(w, `<html>login</html>`)
+		case "redirect":
+			http.Redirect(w, r, "/login", 302)
+		default:
+			w.WriteHeader(401)
+			io.WriteString(w, "private diagnostics must not reach browser")
+		}
+	}))
+	defer server.Close()
+	r := h.admin2("PUT", "jellyfin", map[string]any{"url": server.URL, "api_key": "bad-key"})
+	if r.Code != 400 || h.g.jellyfinConfig().SealedKey != "" {
+		t.Fatal("invalid initial connection saved", r.Code)
+	}
+	r = h.admin2("PUT", "jellyfin", map[string]any{"url": server.URL, "api_key": "good-key"})
+	if r.Code != 200 || !strings.Contains(r.Body.String(), `"validated":true`) {
+		t.Fatal("missing confirmation", r.Code, r.Body.String())
+	}
+	saved := h.g.jellyfinConfig()
+	for _, key := range []string{"bad-key", "wrong-response", "redirect"} {
+		r = h.admin2("PUT", "jellyfin", map[string]any{"url": server.URL, "api_key": key})
+		if r.Code != 400 || h.g.jellyfinConfig() != saved {
+			t.Fatal("failed validation overwrote saved settings", key, r.Code)
+		}
+		if strings.Contains(r.Body.String(), "private diagnostics") {
+			t.Fatal("upstream response leaked")
+		}
+	}
+	r = h.admin2("PUT", "jellyfin", map[string]any{"url": server.URL, "api_key": ""})
+	if r.Code != 200 || h.g.jellyfinConfig() != saved {
+		t.Fatal("keeping saved key failed", r.Code)
+	}
+	failed := httptest.NewServer(http.NotFoundHandler())
+	failedURL := failed.URL
+	failed.Close()
+	r = h.admin2("PUT", "jellyfin", map[string]any{"url": failedURL, "api_key": "good-key"})
+	if r.Code != 400 || h.g.jellyfinConfig() != saved {
+		t.Fatal("unreachable connection saved", r.Code)
+	}
+	b, _ := os.ReadFile(h.cfg.DataPath)
+	if strings.Contains(string(b), "good-key") {
+		t.Fatal("API key persisted as plaintext")
+	}
+}

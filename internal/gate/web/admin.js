@@ -1607,7 +1607,7 @@
       });
       var server=h("input",{type:"url",placeholder:"http://jellyfin.lan:8096"}),key=h("input",{type:"password",autocomplete:"new-password"});
       api("GET",V2+"jellyfin").then(function(d){server.value=d.url||"";key.placeholder=d.key_configured?"Saved; leave blank to keep":"Jellyfin administrator API key";},function(e){flash(e.message,true);});
-      add(out,h("form",{class:"card",onsubmit:function(e){e.preventDefault();api("PUT",V2+"jellyfin",{url:server.value,api_key:key.value}).then(function(){key.value="";flash("Jellyfin account provisioning configured");},function(e){flash(e.message,true);});}},h("h2",{text:"Jellyfin account provisioning"}),field("Internal Jellyfin server URL",server),field("Jellyfin API key (encrypted at rest)",key),h("button",{text:"Save Jellyfin connection"})));
+      add(out,h("form",{class:"card",onsubmit:function(e){e.preventDefault();var save=e.currentTarget.querySelector("button");save.disabled=true;flash("Validating Jellyfin connection…");api("PUT",V2+"jellyfin",{url:server.value,api_key:key.value}).then(function(){key.value="";flash("Jellyfin connection verified and saved");},function(e){flash(e.message,true);}).then(function(){save.disabled=false;});}},h("h2",{text:"Jellyfin account provisioning"}),field("Internal Jellyfin server URL",server),field("Jellyfin API key (encrypted at rest)",key),h("button",{text:"Validate and save Jellyfin connection"})));
       return out;
     });
   };

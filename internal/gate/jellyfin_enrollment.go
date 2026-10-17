@@ -104,12 +104,22 @@ func (g *Gate) putJellyfinAdmin(w http.ResponseWriter, r *http.Request, k *Admin
 		writeError(w, 400, "Jellyfin API key required")
 		return
 	}
+	// Validate the candidate without changing the saved connection. A public health
+	// endpoint would not check the API key or the Gate plugin's authorization.
+	var libraries []struct {
+		Name string `json:"Name"`
+		ID   string `json:"ItemId"`
+	}
+	if err := g.jellyfinCall(r.Context(), s, "GET", "/Library/VirtualFolders", nil, &libraries); err != nil {
+		writeError(w, 400, "Jellyfin connection validation failed; settings were not saved: "+err.Error())
+		return
+	}
 	if g.store.Update(func(d *storeData) error { d.JellyfinAdmin = &s; return nil }) != nil {
 		writeError(w, 500, "could not save settings")
 		return
 	}
 	g.audit.write(g.cfg.Now(), "jellyfin_settings_changed", map[string]any{"actor": k.Name})
-	writeJSON(w, 200, map[string]any{"ok": true})
+	writeJSON(w, 200, map[string]any{"ok": true, "validated": true})
 }
 
 // Errors deliberately contain no response bodies, request bodies or credentials.
