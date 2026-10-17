@@ -252,3 +252,24 @@ func TestOversizeDataFileStopsUpdate(t *testing.T) {
 		t.Fatalf("truncated backup left: %v", backups)
 	}
 }
+
+// The Gate owns the data directory. A FIFO there must not be accepted as an
+// empty backup, nor may a device keep the privileged updater reading forever.
+func TestBackupRejectsSpecialDataFile(t *testing.T) {
+	dir := t.TempDir()
+	data := filepath.Join(dir, "gate.json")
+	if err := syscall.Mkfifo(data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in := &Installer{DataPath: data, BackupDir: filepath.Join(dir, "backups"), Current: "1.0.0"}
+	if _, err := in.backupData(); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("backup accepted a FIFO: %v", err)
+	}
+	backups, err := os.ReadDir(in.BackupDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 0 {
+		t.Fatal("special file created a misleading backup")
+	}
+}

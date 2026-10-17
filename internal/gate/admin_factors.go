@@ -62,7 +62,8 @@ func (g *Gate) handleAdminVerify(w http.ResponseWriter, r *http.Request, key *Ad
 		return
 	}
 	token := g.adminCookieToken(r)
-	if token == "" || !g.adminHasFactor(key) {
+	sess, sessionOK := g.adminSessions.use(token, clientIP(r), g.cfg.Now())
+	if !sessionOK || sess.keyID != key.ID || !g.adminHasFactor(key) {
 		writeError(w, http.StatusConflict, "re-verification needs a dashboard session and an admin key linked to an owner with an authenticator app")
 		return
 	}
@@ -96,7 +97,7 @@ func (g *Gate) handleAdminLink(w http.ResponseWriter, r *http.Request, key *Admi
 	token := g.adminCookieToken(r)
 	if g.adminHasFactor(key) {
 		sess, ok := g.adminSessions.use(token, clientIP(r), now)
-		if !ok || now.Sub(sess.verifiedAt) > recentVerification {
+		if !ok || sess.keyID != key.ID || now.Sub(sess.verifiedAt) > recentVerification {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "recent_verification_required"})
 			return
 		}

@@ -398,10 +398,17 @@ func (in *Installer) backupData() (string, error) {
 	} else if err != nil {
 		return "", err
 	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("the data file is not a regular file; refusing an unsafe backup")
+	}
 	// SECURITY: read one byte past the limit, so a larger file fails the
 	// update instead of leaving a truncated backup that looks complete.
 	data, err := io.ReadAll(io.LimitReader(f, maxBackupSize+1))
-	f.Close()
 	if err != nil {
 		return "", err
 	}

@@ -101,6 +101,12 @@ func (g *geoResolver) lookup(ip string, now time.Time) geoResult {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.reload(now)
+	// A cached country must not outlive the database's freshness window.
+	// Otherwise a hot address can retain country-based access after the
+	// policy should start treating its location as unknown.
+	if g.lookupFn == nil && g.db != nil && now.Sub(g.built) > g.maxAge {
+		return geoResult{Status: "stale"}
+	}
 	if c, ok := g.cache[a]; ok && now.Before(c.expires) {
 		return c.res
 	}

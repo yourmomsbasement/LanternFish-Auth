@@ -442,6 +442,15 @@ class RecoveryTestBase(RecoveryHelpers):
         after = sorted(p.name for p in self.tmp.iterdir())
         self.assertEqual(before, after)
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires FIFOs")
+    def test_backup_refuses_fifo_without_waiting_for_writer(self):
+        self.data.unlink()
+        os.mkfifo(self.data, 0o600)
+        archive = self.tmp / "backup.age"
+        proc = self.backup(archive, expect=1)
+        self.assertIn("not a regular file", proc.stderr)
+        self.assertFalse(archive.exists())
+
     def test_backup_refuses_symlinked_input(self):
         link = self.tmp / "gate-link.json"
         os.symlink(self.data, link)

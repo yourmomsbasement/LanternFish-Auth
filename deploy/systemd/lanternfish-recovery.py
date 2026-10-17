@@ -117,7 +117,10 @@ def _parse_utc(text: object) -> _dt.datetime:
 
 def _open_regular_nofollow(path: str):
     """Open a regular file read-only, refusing to follow a symlink."""
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    # Opening a FIFO must not block before fstat can reject it. Regular-file
+    # reads are unaffected by O_NONBLOCK.
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     try:
         fd = os.open(path, flags)
     except OSError as exc:

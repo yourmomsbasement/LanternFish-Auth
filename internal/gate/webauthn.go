@@ -290,6 +290,11 @@ func (g *Gate) handleVerifyPasskeyFinish(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	pol := g.policyByVersion(v.policyVersion)
+	if pol == nil {
+		g.verifications.remove(handle)
+		writeError(w, http.StatusConflict, "the policy changed; start again")
+		return
+	}
 	user, ok := g.passkeyUser(v.subjectID, pol.Policy.WebAuthn)
 	parsed, err := protocol.ParseCredentialRequestResponseBody(bytes.NewReader(body))
 	var cred *webauthn.Credential
