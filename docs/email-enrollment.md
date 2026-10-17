@@ -57,6 +57,10 @@ In Email, configure the internal Jellyfin server URL and an administrator API ke
 under **Jellyfin account provisioning**. The API key is sealed with the Gate's
 master key, never returned to the browser, and sent only in an HTTP header.
 Use HTTPS when the internal network is not trusted. Redirects are refused.
+The Gate signs these API requests with its existing upstream signing key, so
+the LanternFish Jellyfin plugin can stay enforced. Keep using Jellyfin's direct
+internal URL, not the public Gate URL. Both the Gate signature and the Jellyfin
+API key are required when the plugin is enforced.
 
 Both **Tickets → New enrollment ticket** and emailed invitations include
 **Optional Jellyfin account**. Enable it, load libraries, select at least one,

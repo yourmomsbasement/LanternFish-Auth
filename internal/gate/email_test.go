@@ -2,6 +2,7 @@ package gate
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	mailer "github.com/yourmomsbasement/lanternfish-auth/internal/mail"
 	"io"
@@ -214,6 +215,12 @@ func TestJellyfinAccountProvisioning(t *testing.T) {
 				mu.Lock()
 				defer mu.Unlock()
 				calls = append(calls, r.Method+" "+r.URL.Path)
+				pub, _ := x509.MarshalPKIXPublicKey(&h.g.upstream.PublicKey)
+				if !verifyUpstream(t, pub, r) || r.Header.Get(deviceHeader) != "gate-service" {
+					t.Error("unsigned Jellyfin administration request")
+					w.WriteHeader(403)
+					return
+				}
 				if r.Header.Get("X-Emby-Token") != "secret-api-key" {
 					t.Error("API authentication missing")
 				}
@@ -332,5 +339,39 @@ func TestEmailRetryRotatesClaimAndPreservesPolicy(t *testing.T) {
 	b, _ := os.ReadFile(h.cfg.DataPath)
 	if strings.Contains(string(b), raw) {
 		t.Fatal("retry token persisted")
+	}
+}
+
+func TestJellyfinLibrariesRequireGateSignatureAndAPIKey(t *testing.T) {
+	h := newHarness(t)
+	pub, _ := x509.MarshalPKIXPublicKey(&h.g.upstream.PublicKey)
+	nonces := map[string]bool{}
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		nonce := r.Header.Get(gateNonceHeader)
+		if !verifyUpstream(t, pub, r) || nonce == "" || nonces[nonce] || r.Header.Get(deviceHeader) != "gate-service" || r.Header.Get("X-Emby-Token") != "admin-key" {
+			w.WriteHeader(403)
+			return
+		}
+		nonces[nonce] = true
+		if r.RequestURI != "/jellyfin/Library/VirtualFolders" {
+			t.Error("base path not preserved", r.RequestURI)
+			w.WriteHeader(404)
+			return
+		}
+		io.WriteString(w, `[{"Name":"Movies","ItemId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]`)
+	}))
+	defer server.Close()
+	h.g.store.Update(func(d *storeData) error {
+		d.JellyfinAdmin = &JellyfinAdminSettings{URL: server.URL + "/jellyfin", SealedKey: h.g.sealer.Seal("jellyfin-admin-key", []byte("admin-key"))}
+		return nil
+	})
+	for i := 0; i < 2; i++ {
+		r := h.admin2("GET", "jellyfin/libraries", nil)
+		if r.Code != 200 || !strings.Contains(r.Body.String(), "Movies") {
+			t.Fatal(r.Code, r.Body.String())
+		}
 	}
 }

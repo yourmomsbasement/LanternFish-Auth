@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -133,6 +134,10 @@ func (g *Gate) jellyfinCall(ctx context.Context, s JellyfinAdminSettings, method
 	}
 	req.Header.Set("X-Emby-Token", string(key))
 	req.Header.Set("Content-Type", "application/json")
+	// Service requests pass the same Gate-signature check as proxied traffic.
+	// This identifies the Gate service; Jellyfin independently authorizes the API key.
+	req.Header.Set(deviceHeader, "gate-service")
+	g.signUpstream(req)
 	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	res, e := client.Do(req)
 	if e != nil {
@@ -140,7 +145,7 @@ func (g *Gate) jellyfinCall(ctx context.Context, s JellyfinAdminSettings, method
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return errors.New("Jellyfin rejected request")
+		return fmt.Errorf("Jellyfin returned HTTP %d", res.StatusCode)
 	}
 	if out != nil {
 		return json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(out)
@@ -152,8 +157,8 @@ func (g *Gate) getJellyfinLibraries(w http.ResponseWriter, r *http.Request, k *A
 		Name string `json:"Name"`
 		ID   string `json:"ItemId"`
 	}
-	if g.jellyfinCall(r.Context(), g.jellyfinConfig(), "GET", "/Library/VirtualFolders", nil, &folders) != nil {
-		writeError(w, 502, "could not load Jellyfin libraries")
+	if err := g.jellyfinCall(r.Context(), g.jellyfinConfig(), "GET", "/Library/VirtualFolders", nil, &folders); err != nil {
+		writeError(w, 502, "could not load Jellyfin libraries: "+err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"libraries": folders})
