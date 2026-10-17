@@ -55,7 +55,7 @@ invitations use `tickets`.
 
 In Email, configure the internal Jellyfin server URL and an administrator API key
 under **Jellyfin account provisioning**. The API key is sealed with the Gate's
-master key, never returned to the browser, and sent only in an HTTP header.
+master key, never returned to the browser, and sent only as `Authorization: MediaBrowser Token="..."`.
 Saving first validates the proposed connection with a signed, authenticated
 library request. Only a successful response saves the connection; failures
 leave the previous settings intact.

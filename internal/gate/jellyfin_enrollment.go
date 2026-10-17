@@ -142,7 +142,11 @@ func (g *Gate) jellyfinCall(ctx context.Context, s JellyfinAdminSettings, method
 	if e != nil {
 		return errors.New("invalid Jellyfin endpoint")
 	}
-	req.Header.Set("X-Emby-Token", string(key))
+	token := strings.TrimSpace(string(key))
+	if token == "" || strings.ContainsAny(token, "\"\\\r\n") {
+		return errors.New("invalid Jellyfin API key")
+	}
+	req.Header.Set("Authorization", `MediaBrowser Token="`+token+`"`)
 	req.Header.Set("Content-Type", "application/json")
 	// Service requests pass the same Gate-signature check as proxied traffic.
 	// This identifies the Gate service; Jellyfin independently authorizes the API key.

@@ -221,7 +221,7 @@ func TestJellyfinAccountProvisioning(t *testing.T) {
 					w.WriteHeader(403)
 					return
 				}
-				if r.Header.Get("X-Emby-Token") != "secret-api-key" {
+				if r.Header.Get("Authorization") != `MediaBrowser Token="secret-api-key"` || r.Header.Get("X-Emby-Token") != "" {
 					t.Error("API authentication missing")
 				}
 				switch {
@@ -351,7 +351,7 @@ func TestJellyfinLibrariesRequireGateSignatureAndAPIKey(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		nonce := r.Header.Get(gateNonceHeader)
-		if !verifyUpstream(t, pub, r) || nonce == "" || nonces[nonce] || r.Header.Get(deviceHeader) != "gate-service" || r.Header.Get("X-Emby-Token") != "admin-key" {
+		if !verifyUpstream(t, pub, r) || nonce == "" || nonces[nonce] || r.Header.Get(deviceHeader) != "gate-service" || r.Header.Get("Authorization") != `MediaBrowser Token="admin-key"` || r.Header.Get("X-Emby-Token") != "" {
 			w.WriteHeader(403)
 			return
 		}
@@ -385,12 +385,12 @@ func TestJellyfinSettingsValidateBeforeSave(t *testing.T) {
 			w.WriteHeader(403)
 			return
 		}
-		switch r.Header.Get("X-Emby-Token") {
-		case "good-key":
+		switch r.Header.Get("Authorization") {
+		case `MediaBrowser Token="good-key"`:
 			io.WriteString(w, `[]`)
-		case "wrong-response":
+		case `MediaBrowser Token="wrong-response"`:
 			io.WriteString(w, `<html>login</html>`)
-		case "redirect":
+		case `MediaBrowser Token="redirect"`:
 			http.Redirect(w, r, "/login", 302)
 		default:
 			w.WriteHeader(401)
@@ -430,5 +430,33 @@ func TestJellyfinSettingsValidateBeforeSave(t *testing.T) {
 	b, _ := os.ReadFile(h.cfg.DataPath)
 	if strings.Contains(string(b), "good-key") {
 		t.Fatal("API key persisted as plaintext")
+	}
+}
+
+func TestJellyfinAuthorizationNormalizesSavedToken(t *testing.T) {
+	h := newHarness(t)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Header.Get("Authorization") != `MediaBrowser Token="test-key"` || r.Header.Get("X-Emby-Token") != "" {
+			t.Error("incorrect Jellyfin authorization header")
+		}
+		w.WriteHeader(204)
+	}))
+	defer server.Close()
+	for _, token := range []string{"test-key", "  test-key \n"} {
+		s := JellyfinAdminSettings{URL: server.URL, SealedKey: h.g.sealer.Seal("jellyfin-admin-key", []byte(token))}
+		if e := h.g.jellyfinCall(context.Background(), s, "GET", "/Library/VirtualFolders", nil, nil); e != nil {
+			t.Fatal(e)
+		}
+	}
+	for _, token := range []string{"   ", `key"quoted`, "key\r\nInjected: value", `key\escaped`} {
+		s := JellyfinAdminSettings{URL: server.URL, SealedKey: h.g.sealer.Seal("jellyfin-admin-key", []byte(token))}
+		if e := h.g.jellyfinCall(context.Background(), s, "GET", "/Library/VirtualFolders", nil, nil); e == nil {
+			t.Fatal("invalid token accepted")
+		}
+	}
+	if requests.Load() != 2 {
+		t.Fatal("invalid token sent to server")
 	}
 }
