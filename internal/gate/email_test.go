@@ -229,10 +229,15 @@ func TestJellyfinAccountProvisioning(t *testing.T) {
 					var body map[string]string
 					json.NewDecoder(r.Body).Decode(&body)
 					createPassword = body["Password"]
-					io.WriteString(w, `{"Id":"`+id+`"}`)
+					io.WriteString(w, `{"Id":"`+id+`","Policy":{"AuthenticationProviderId":"server.auth.provider","PasswordResetProviderId":"server.reset.provider"}}`)
 				case strings.HasSuffix(r.URL.Path, "/Policy"):
 					var body map[string]any
 					json.NewDecoder(r.Body).Decode(&body)
+					if body["AuthenticationProviderId"] != "server.auth.provider" || body["PasswordResetProviderId"] != "server.reset.provider" {
+						t.Error("required provider IDs not preserved")
+						w.WriteHeader(400)
+						return
+					}
 					policies = append(policies, body)
 					if failPolicy {
 						w.WriteHeader(500)
@@ -261,6 +266,9 @@ func TestJellyfinAccountProvisioning(t *testing.T) {
 			} else {
 				if r.Code != 201 {
 					t.Fatal(r.Code, r.Body.String())
+				}
+				if !contains(calls, "POST /Users/Password") {
+					t.Fatal("modern password route not used", calls)
 				}
 				if len(policies) != 2 || policies[0]["IsDisabled"] != true || policies[1]["IsDisabled"] != false || policies[1]["EnableAllFolders"] != false || policies[1]["IsAdministrator"] != false {
 					t.Fatalf("unsafe policies: %v", policies)
@@ -458,5 +466,91 @@ func TestJellyfinAuthorizationNormalizesSavedToken(t *testing.T) {
 	}
 	if requests.Load() != 2 {
 		t.Fatal("invalid token sent to server")
+	}
+}
+
+func TestJellyfinProvisioningProviderFallbackAndFailureStages(t *testing.T) {
+	for _, scenario := range []string{"fallback", "missing_providers", "create_rejected"} {
+		t.Run(scenario, func(t *testing.T) {
+			h := newHarness(t)
+			key, enr := h.enrollECDSA("web")
+			token := h.signIn(enr.DeviceID, func(m []byte) []byte { return rawSign(key, m) })
+			id := strings.Repeat("b", 32)
+			var callsMu sync.Mutex
+			var calls []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				callsMu.Lock()
+				defer callsMu.Unlock()
+				calls = append(calls, r.Method+" "+r.URL.Path)
+				switch {
+				case r.URL.Path == "/Users/New":
+					if scenario == "create_rejected" {
+						w.WriteHeader(403)
+						io.WriteString(w, "sensitive upstream error")
+						return
+					}
+					io.WriteString(w, `{"Id":"`+id+`"}`)
+				case r.Method == "GET" && r.URL.Path == "/Users/"+id:
+					if scenario == "missing_providers" {
+						io.WriteString(w, `{"Id":"`+id+`","Policy":{}}`)
+						return
+					}
+					io.WriteString(w, `{"Id":"`+id+`","Policy":{"AuthenticationProviderId":"custom.auth","PasswordResetProviderId":"custom.reset"}}`)
+				case strings.HasSuffix(r.URL.Path, "/Policy"):
+					var body map[string]any
+					json.NewDecoder(r.Body).Decode(&body)
+					if body["AuthenticationProviderId"] != "custom.auth" || body["PasswordResetProviderId"] != "custom.reset" || body["EnableAllFolders"] != false || body["IsAdministrator"] != false {
+						t.Error("provider metadata or restrictions lost")
+						w.WriteHeader(400)
+						return
+					}
+					w.WriteHeader(204)
+				case r.URL.Path == "/Users/Password":
+					if r.URL.Query().Get("userId") != id {
+						t.Error("password not bound to created user")
+					}
+					w.WriteHeader(204)
+				default:
+					w.WriteHeader(204)
+				}
+			}))
+			defer server.Close()
+			h.g.store.Update(func(d *storeData) error {
+				d.JellyfinAdmin = &JellyfinAdminSettings{URL: server.URL, SealedKey: h.g.sealer.Seal("jellyfin-admin-key", []byte("key"))}
+				d.Devices[enr.DeviceID].JellyfinEnrollment = &JellyfinEnrollment{Libraries: []string{id}, Playback: true}
+				return nil
+			})
+			r := h.do("POST", "/_lanternfish/v2/jellyfin/account", map[string]string{"username": "alice", "password": "my-private-password"}, map[string]string{sessionHeader: token, "Origin": "https://gate.example", "X-Lanternfish-Account": "create"})
+			callsMu.Lock()
+			defer callsMu.Unlock()
+			if scenario == "fallback" {
+				if r.Code != 201 || !contains(calls, "GET /Users/"+id) {
+					t.Fatal(r.Code, r.Body.String(), calls)
+				}
+				return
+			}
+			if r.Code != 502 {
+				t.Fatal(r.Code, r.Body.String())
+			}
+			out := decode[map[string]any](t, r)
+			if scenario == "missing_providers" {
+				if out["stage"] != "load_user_policy" || !contains(calls, "DELETE /Users/"+id) || contains(calls, "POST /Users/Password") {
+					t.Fatal("unsafe provider failure", out, calls)
+				}
+			} else {
+				if out["stage"] != "create_user" || out["jellyfin_status"] != float64(403) {
+					t.Fatal("missing rejection details", out)
+				}
+			}
+			h.g.store.View(func(d *storeData) {
+				if d.Devices[enr.DeviceID].JellyfinSetupState != "" {
+					t.Error("definite rejection or completed cleanup blocked retry")
+				}
+			})
+			b, _ := os.ReadFile(h.cfg.AuditPath)
+			if !strings.Contains(string(b), `"stage"`) || strings.Contains(string(b), "my-private-password") || strings.Contains(r.Body.String(), "sensitive upstream error") {
+				t.Fatal("unsafe or incomplete diagnostics")
+			}
+		})
 	}
 }

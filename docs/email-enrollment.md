@@ -132,3 +132,18 @@ The Tickets form also accepts an optional email recipient. Leaving it empty
 creates the usual copyable ticket; supplying it queues a claim invitation using
 the selected owner, policy and Jellyfin account permissions (email expiry is
 limited to 60 minutes). Email settings must already be enabled.
+
+### Jellyfin 13 policy compatibility
+
+Provisioning preserves `AuthenticationProviderId` and `PasswordResetProviderId`
+from the newly created user's server policy. These are required policy fields;
+LanternFish does not hardcode provider implementation names. If the create-user
+response omits them, a signed user lookup retrieves them before any policy or
+chosen-password update. Missing provider metadata stops provisioning and triggers
+cleanup. Password changes use `POST /Users/Password?userId=...`.
+
+A failed `jellyfin_account_failed` audit event includes a safe `stage` and
+`http_status`. Stages distinguish user creation, provider lookup, restrictive
+policy application, password setup and final enablement. No upstream error body,
+password or API key is recorded. Definite create-user rejections such as HTTP
+400/401/403 allow another attempt; ambiguous failures still require admin review.

@@ -51,6 +51,24 @@ func (p *JellyfinEnrollment) policy(disabled bool) map[string]any {
 		"EnableContentDeletion": false, "EnableContentDeletionFromFolders": []string{}, "EnableAllDevices": true, "EnableAllChannels": false, "EnabledChannels": []string{},
 		"EnableLiveTvAccess": false, "EnableLiveTvManagement": false, "EnableSharedDeviceControl": false, "EnableRemoteControlOfOtherUsers": false, "EnablePublicSharing": false, "EnableSyncTranscoding": false}
 }
+
+type jellyfinProviders struct {
+	AuthenticationProviderID string `json:"AuthenticationProviderId"`
+	PasswordResetProviderID  string `json:"PasswordResetProviderId"`
+}
+
+func (p jellyfinProviders) valid() bool {
+	return strings.TrimSpace(p.AuthenticationProviderID) != "" && strings.TrimSpace(p.PasswordResetProviderID) != ""
+}
+func (p jellyfinProviders) apply(policy map[string]any) map[string]any {
+	policy["AuthenticationProviderId"] = p.AuthenticationProviderID
+	policy["PasswordResetProviderId"] = p.PasswordResetProviderID
+	return policy
+}
+
+type jellyfinHTTPError struct{ Status int }
+
+func (e *jellyfinHTTPError) Error() string { return fmt.Sprintf("Jellyfin returned HTTP %d", e.Status) }
 func (g *Gate) jellyfinRoutes(m *http.ServeMux) {
 	const p = "/_lanternfish/admin/v2/jellyfin"
 	m.HandleFunc("GET "+p, g.admin(scopeSettings, g.getJellyfinAdmin))
@@ -159,7 +177,7 @@ func (g *Gate) jellyfinCall(ctx context.Context, s JellyfinAdminSettings, method
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("Jellyfin returned HTTP %d", res.StatusCode)
+		return &jellyfinHTTPError{Status: res.StatusCode}
 	}
 	if out != nil {
 		return json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(out)
@@ -219,26 +237,54 @@ func (g *Gate) createJellyfinAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s := g.jellyfinConfig()
 	var user struct {
-		ID string `json:"Id"`
+		ID     string            `json:"Id"`
+		Policy jellyfinProviders `json:"Policy"`
 	}
 	// Start with an unguessable password. The chosen password is set only after restrictions apply.
+	stage := "create_user"
 	e := g.jellyfinCall(r.Context(), s, "POST", "/Users/New", map[string]any{"Name": req.Username, "Password": randomToken()}, &user)
 	if e == nil && !jellyfinID.MatchString(user.ID) {
 		e = errors.New("invalid Jellyfin user response")
 	}
-	if e == nil {
-		e = g.jellyfinCall(r.Context(), s, "POST", "/Users/"+user.ID+"/Policy", policy.policy(true), nil)
+
+	if e == nil && !user.Policy.valid() {
+		stage = "load_user_policy"
+		var existing struct {
+			Policy jellyfinProviders `json:"Policy"`
+		}
+		e = g.jellyfinCall(r.Context(), s, "GET", "/Users/"+user.ID, nil, &existing)
+		if e == nil {
+			user.Policy = existing.Policy
+			if !user.Policy.valid() {
+				e = errors.New("missing Jellyfin authentication providers")
+			}
+		}
 	}
 	if e == nil {
-		e = g.jellyfinCall(r.Context(), s, "POST", "/Users/"+user.ID+"/Password", map[string]any{"NewPw": req.Password, "ResetPassword": false}, nil)
+		stage = "restrict_policy"
+		e = g.jellyfinCall(r.Context(), s, "POST", "/Users/"+user.ID+"/Policy", user.Policy.apply(policy.policy(true)), nil)
 	}
 	if e == nil {
-		e = g.jellyfinCall(r.Context(), s, "POST", "/Users/"+user.ID+"/Policy", policy.policy(false), nil)
+		stage = "set_password"
+		e = g.jellyfinCall(r.Context(), s, "POST", "/Users/Password?userId="+url.QueryEscape(user.ID), map[string]any{"NewPw": req.Password, "ResetPassword": false}, nil)
 	}
+	if e == nil {
+		stage = "enable_user"
+		e = g.jellyfinCall(r.Context(), s, "POST", "/Users/"+user.ID+"/Policy", user.Policy.apply(policy.policy(false)), nil)
+	}
+
 	req.Password = ""
 	if e != nil {
 		// Ambiguous network failures stay locked for admin reconciliation; never create duplicates automatically.
 		state := "needs_admin_review"
+		var httpErr *jellyfinHTTPError
+		httpStatus := 0
+		if errors.As(e, &httpErr) {
+			httpStatus = httpErr.Status
+		}
+		if stage == "create_user" && (httpStatus == 400 || httpStatus == 401 || httpStatus == 403 || httpStatus == 404 || httpStatus == 405 || httpStatus == 422) {
+			state = ""
+		}
 		if jellyfinID.MatchString(user.ID) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if g.jellyfinCall(ctx, s, "DELETE", "/Users/"+user.ID, nil, nil) == nil {
@@ -252,8 +298,8 @@ func (g *Gate) createJellyfinAccount(w http.ResponseWriter, r *http.Request) {
 			}
 			return nil
 		})
-		g.audit.write(g.cfg.Now(), "jellyfin_account_failed", map[string]any{"device_id": a.dev.ID, "state": state})
-		writeError(w, 502, "account creation failed; contact the administrator if retry is unavailable")
+		g.audit.write(g.cfg.Now(), "jellyfin_account_failed", map[string]any{"device_id": a.dev.ID, "state": state, "stage": stage, "http_status": httpStatus})
+		writeJSON(w, 502, map[string]any{"error": "account creation failed; contact the administrator if retry is unavailable", "stage": stage, "jellyfin_status": httpStatus})
 		return
 	}
 	if e = g.store.Update(func(d *storeData) error {
