@@ -586,6 +586,10 @@
   }
 
 
+  function field(label, el, hint) {
+    return h("div", { class: "field" }, h("label", { text: label }), el, hint ? h("span", { class: "muted small", text: hint }) : null);
+  }
+
   function jellyfinPolicyFields() {
     var enable=h("input",{type:"checkbox"}), libraries=h("div"), choices=[];
     var play=h("input",{type:"checkbox",checked:true}),remote=h("input",{type:"checkbox",checked:true}),download=h("input",{type:"checkbox"}),transcode=h("input",{type:"checkbox",checked:true});
@@ -686,9 +690,6 @@
       var el = h("input", { type: "checkbox", checked: obj[key] });
       el.addEventListener("change", function () { obj[key] = el.checked; if (onchange) onchange(); });
       return el;
-    }
-    function field(label, el, hint) {
-      return h("div", { class: "field" }, h("label", { text: label }), el, hint ? h("span", { class: "muted small", text: hint }) : null);
     }
     // datetime-local in the browser's time zone <-> RFC 3339
     function localInput(iso, onchange) {

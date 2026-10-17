@@ -10,6 +10,23 @@ permissions:
   contents: read
 
 jobs:
+  dashboard:
+    name: Dashboard browser rendering
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install browser test runtime
+        run: |
+          npm install --prefix /tmp/lanternfish-browser --no-save --package-lock=false playwright@1.62.1
+          node /tmp/lanternfish-browser/node_modules/playwright/cli.js install --with-deps chromium
+      - name: Render Tickets and Email with mocked APIs
+        env:
+          NODE_PATH: /tmp/lanternfish-browser/node_modules
+        run: node scripts/test-admin-render.cjs
+
   gate:
     name: Gate (Go)
     runs-on: ubuntu-latest
