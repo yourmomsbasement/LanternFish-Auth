@@ -155,6 +155,11 @@ const (
 )
 
 type Gate struct {
+	emailWG          sync.WaitGroup
+	emailClosed      bool
+	emailMu          sync.Mutex
+	emailActive      int
+	emailLimits      map[string][]time.Time
 	serviceAlertMu   sync.Mutex
 	serviceDriftLast time.Time
 	cfg              Config
@@ -314,7 +319,13 @@ func New(cfg Config) (*Gate, error) {
 	return g, nil
 }
 
-func (g *Gate) Close() error { return g.audit.Close() }
+func (g *Gate) Close() error {
+	g.emailMu.Lock()
+	g.emailClosed = true
+	g.emailMu.Unlock()
+	g.emailWG.Wait()
+	return g.audit.Close()
+}
 
 func (g *Gate) Handler() http.Handler { return g.handler }
 
@@ -377,6 +388,7 @@ func (g *Gate) routes() http.Handler {
 	mux.HandleFunc("GET /_lanternfish/admin/v1/devices", g.admin(scopeDevices, g.handleListDevices))
 	mux.HandleFunc("POST /_lanternfish/admin/v1/devices/{id}/revoke", g.admin(scopeDevices, g.handleRevokeDevice))
 	g.adminV2Routes(mux)
+	g.emailRoutes(mux)
 	g.adminUIRoutes(mux)
 	g.adminFactorRoutes(mux)
 	mux.HandleFunc("GET /_lanternfish/admin/v2/update", g.admin(scopeUpdates, g.handleGetUpdate))

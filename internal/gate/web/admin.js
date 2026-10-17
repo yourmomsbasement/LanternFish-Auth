@@ -583,6 +583,14 @@
     } });
   }
 
+
+  function jellyfinPolicyFields() {
+    var enable=h("input",{type:"checkbox"}), libraries=h("div"), choices=[];
+    var play=h("input",{type:"checkbox",checked:true}),remote=h("input",{type:"checkbox",checked:true}),download=h("input",{type:"checkbox"}),transcode=h("input",{type:"checkbox",checked:true});
+    var box=h("fieldset",null,h("legend",{text:"Optional Jellyfin account"}),field("Let recipient create a Jellyfin username and password",enable),h("button",{type:"button",text:"Load libraries",onclick:function(){api("GET",V2+"jellyfin/libraries").then(function(d){clear(libraries);choices=[];d.libraries.forEach(function(lib){var c=h("input",{type:"checkbox"});choices.push({id:lib.ItemId,input:c});add(libraries,field(lib.Name,c));});},function(e){flash(e.message,true);});}}),libraries,field("Allow media playback",play),field("Allow remote access",remote),field("Allow downloads",download),field("Allow transcoding and remuxing",transcode),h("p",{text:"Select at least one library. The account will have no administrator, deletion, live TV, or other-user control permissions. Browser users are prompted after enrollment; native clients can open /_lanternfish/account/ in their enrolled browser."}));
+    return {node:box,value:function(){return enable.checked?{libraries:choices.filter(function(x){return x.input.checked;}).map(function(x){return x.id;}),playback:play.checked,remote_access:remote.checked,downloads:download.checked,transcoding:transcode.checked}:null;}};
+  }
+
   tabs.tickets = function () {
     return api("GET", V1 + "tickets").then(function (data) {
       var platform = h("select", null, PLATFORMS.map(function (p) { return h("option", { value: p, text: p }); }));
@@ -593,12 +601,15 @@
       var ttl = h("input", { type: "number", min: "1", max: "1440", value: "60", class: "small" });
       var origin = h("input", { value: publicOrigin(), size: "32", title: "The address phones will use (your public domain)" });
       origin.addEventListener("change", function () { try { localStorage.setItem("lf-public-origin", origin.value.replace(/\/+$/, "")); } catch (e) { /* not kept */ } });
-      var result = h("div");
+      var result = h("div"), jellyfin = jellyfinPolicyFields(), emailRecipient = h("input", {type:"email",placeholder:"Optional: email invitation instead"});
+      emailRecipient.addEventListener("change",function(){if(emailRecipient.value && Number(ttl.value)>15)ttl.value="15";});
 
       var form = h("form", { class: "card", onsubmit: function (e) {
         e.preventDefault();
-        api("POST", V1 + "tickets", { platform: platform.value, label: label.value, subject_id: owner.value,
-          profile_id: prof.value, ttl_seconds: Math.round(Number(ttl.value) * 60) }).then(function (t) {
+        var request={platform:platform.value,label:label.value,subject_id:owner.value,jellyfin_enrollment:jellyfin.value(),profile_id:prof.value,ttl_seconds:Math.round(Number(ttl.value)*60)};
+        if(emailRecipient.value)request.recipient=emailRecipient.value;
+        api("POST",emailRecipient.value?V2+"email/invitations":V1+"tickets",request).then(function(t){
+          if(t.link){clear(result);add(result,h("p",{text:"Email invitation queued; expires "+when(t.expires_at)+". Check Email for submission status."}),copyButton(t.link));return;}
           clear(result);
           var base = origin.value.replace(/\/+$/, "");
           var link = base + "/_lanternfish/#ticket=" + encodeURIComponent(t.ticket);
@@ -617,7 +628,7 @@
           refreshList();
         }, fail);
       } },
-        h("h2", { text: "New enrollment ticket" }),
+        h("h2", { text: "New enrollment ticket" }), field("Email recipient (optional)",emailRecipient), jellyfin.node,
         h("div", { class: "row" },
           h("div", { class: "field" }, h("label", { text: "Platform" }), platform),
           h("div", { class: "field" }, h("label", { text: "Label" }), label),
@@ -1564,6 +1575,35 @@
       if (err && err.message === "signed out") throw err;
       pollTimer = setTimeout(function () { if (location.hash === "#updates") reload(); }, 4000);
       return h("div", { class: "card" }, h("p", { text: "Waiting for the Gate… (" + err.message + ")" }));
+    });
+  };
+
+
+  tabs.email = function () {
+    return Promise.all([api("GET", V2 + "email"), api("GET", V2 + "email/invitations")]).then(function (data) {
+      var s = data[0], out = h("div"), result = h("div"), jf = jellyfinPolicyFields();
+      var enabled = h("input", {type:"checkbox", checked:s.enabled});
+      var host = h("input", {value:s.host || "", placeholder:"Postfix LAN address"});
+      var port = h("input", {type:"number", min:1, max:65535, value:s.port});
+      var name = h("input", {value:s.from_name}), address = h("input", {type:"email", value:s.from_email});
+      var tls = h("input", {type:"checkbox", checked:s.starttls});
+      var origin = h("input", {type:"url", value:s.public_origin || "", placeholder:"https://media.example.com"});
+      var settings = h("form", {class:"card", onsubmit:function(e){e.preventDefault();api("PUT",V2+"email",{enabled:enabled.checked,host:host.value,port:Number(port.value),from_name:name.value,from_email:address.value,starttls:tls.checked,public_origin:origin.value}).then(function(){flash("Email settings saved");},function(e){flash(e.message,true);});}},
+        h("h2",{text:"Email delivery"}),field("Enable email",enabled),field("SMTP host",host),field("SMTP port",port),field("Sender name",name),field("Sender address",address),field("Use STARTTLS",tls),field("Public HTTPS origin",origin),h("button",{type:"submit",text:"Save email settings"}));
+      var recipient = h("input",{type:"email",required:true});
+      add(settings,h("p",{text:"No SMTP credentials are stored here. Postfix handles outbound authentication and retries."}));
+      add(out,settings,h("form",{class:"card",onsubmit:function(e){e.preventDefault();api("POST",V2+"email/test",{recipient:recipient.value}).then(function(){flash("Test email queued. Check Audit log for submission result.");},function(e){flash(e.message,true);});}},field("Test recipient",recipient),h("button",{text:"Send Test Email"})));
+      var to=h("input",{type:"email",required:true}),label=h("input",{maxlength:64}),platform=h("select",null,PLATFORMS.map(function(p){return h("option",{value:p,text:p});})),ttl=h("input",{type:"number",min:1,max:60,value:15});
+      var owner=h("select",null,cache.subjects.filter(function(x){return x.status==="active";}).map(function(x){return h("option",{value:x.id,text:x.name});})),profile=profileSelect("");
+      add(out,h("form",{class:"card",onsubmit:function(e){e.preventDefault();api("POST",V2+"email/invitations",{jellyfin_enrollment:jf.value(),recipient:to.value,platform:platform.value,label:label.value,ttl_seconds:Number(ttl.value)*60,subject_id:owner.value,profile_id:profile.value}).then(function(x){clear(result);add(result,h("p",{text:"Invitation queued; expires "+when(x.expires_at)+". Refresh Email to check submission status."}),copyButton(x.link));},function(e){flash(e.message,true);});}},h("h2",{text:"Send enrollment invitation"}),jf.node,field("Recipient",to),field("Platform",platform),field("Device label",label),field("Owner",owner),field("Policy",profile),field("Expires (minutes)",ttl),h("button",{text:"Send Enrollment Invitation"}),result));
+      data[1].invitations.forEach(function(x){
+        var retryTo=h("input",{type:"email",placeholder:"Recipient email for retry"});
+        add(out,h("div",{class:"card"},h("p",{text:(x.label||x.platform)+": "+x.status+"; expires "+when(x.expires_at)}),field("Retry recipient",retryTo),h("button",{text:"Retry email",onclick:function(){api("POST",V2+"email/invitations/"+encodeURIComponent(x.id)+"/retry",{recipient:retryTo.value}).then(function(d){clear(result);add(result,h("p",{text:"Retry queued. Previous link revoked. Copy the new link now:"}),copyButton(d.link));flash("Retry queued; refresh Email for status");},function(e){flash(e.message,true);});}}),h("button",{text:"Revoke",onclick:function(){api("DELETE",V2+"email/invitations/"+encodeURIComponent(x.id)).then(reload,function(e){flash(e.message,true);});}})));
+      });
+      var server=h("input",{type:"url",placeholder:"http://jellyfin.lan:8096"}),key=h("input",{type:"password",autocomplete:"new-password"});
+      api("GET",V2+"jellyfin").then(function(d){server.value=d.url||"";key.placeholder=d.key_configured?"Saved; leave blank to keep":"Jellyfin administrator API key";},function(e){flash(e.message,true);});
+      add(out,h("form",{class:"card",onsubmit:function(e){e.preventDefault();api("PUT",V2+"jellyfin",{url:server.value,api_key:key.value}).then(function(){key.value="";flash("Jellyfin account provisioning configured");},function(e){flash(e.message,true);});}},h("h2",{text:"Jellyfin account provisioning"}),field("Internal Jellyfin server URL",server),field("Jellyfin API key (encrypted at rest)",key),h("button",{text:"Save Jellyfin connection"})));
+      return out;
     });
   };
 

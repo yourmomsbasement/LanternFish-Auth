@@ -54,6 +54,12 @@
 
   // afterSignIn: back to the page that sent us here, or on to the application.
   function afterSignIn() {
+    return fetch("/_lanternfish/v2/jellyfin/account",{credentials:"same-origin"}).then(function(r){return r.ok?r.json():{};}).then(function(d){
+      if(d.available){location.replace("/_lanternfish/account/?next="+encodeURIComponent(nextPath()));return new Promise(function(){});}
+      return continueAfterSignIn();
+    },continueAfterSignIn);
+  }
+  function continueAfterSignIn() {
     if (!linkHost) {
       location.replace(nextPath());
       return new Promise(function () {});
@@ -73,7 +79,7 @@
   // toVerify goes to the verification page. The handle travels in the
   // fragment, which browsers never send to a server.
   function toVerify(id, enroll) {
-    var back = linkHost ? location.pathname + location.search : nextPath();
+    var back = enroll ? "/_lanternfish/account/?next=" + encodeURIComponent(nextPath()) : (linkHost ? location.pathname + location.search : nextPath());
     location.assign("/_lanternfish/verify#id=" + encodeURIComponent(id) + (enroll ? "&enroll=1" : "") +
       "&next=" + encodeURIComponent(back));
   }

@@ -292,3 +292,9 @@ Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 Licensed under the [GNU General Public License v3.0](LICENSE). The Jellyfin
 plugin builds against Jellyfin's GPL-3.0 libraries.
+
+Email invitations can be submitted through an internal Postfix relay. Tickets
+and invitations can optionally authorize a recipient to create a Jellyfin
+account with administrator-selected libraries and permissions. See
+[Email enrollment and Jellyfin accounts](docs/email-enrollment.md) for setup,
+security boundaries, failure handling and API details.

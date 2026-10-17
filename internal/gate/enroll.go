@@ -55,7 +55,7 @@ func (g *Gate) prepareEnrollment(w http.ResponseWriter, r *http.Request, req enr
 	}
 	kind := platformKinds[ticket.Platform]
 	fields := map[string]any{"ticket_id": ticket.ID, "platform": ticket.Platform}
-	dev := &Device{ID: newID("dev_"), Name: ticket.Label, Platform: ticket.Platform, Kind: kind, CreatedAt: now,
+	dev := &Device{JellyfinEnrollment: ticket.JellyfinEnrollment, ID: newID("dev_"), Name: ticket.Label, Platform: ticket.Platform, Kind: kind, CreatedAt: now,
 		EnrolledFrom: clientIP(r), SubjectID: ticket.SubjectID, ProfileID: ticket.ProfileID}
 	if dev.SubjectID == "" {
 		dev.SubjectID = defaultSubjectID

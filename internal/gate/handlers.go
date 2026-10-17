@@ -273,11 +273,12 @@ func (g *Gate) admin(scope string, h adminHandler) http.HandlerFunc {
 
 func (g *Gate) handleCreateTicket(w http.ResponseWriter, r *http.Request, key *AdminKey) {
 	var req struct {
-		Platform   string `json:"platform"`
-		Label      string `json:"label"`
-		TTLSeconds int    `json:"ttl_seconds"`
-		SubjectID  string `json:"subject_id"`
-		ProfileID  string `json:"profile_id"`
+		JellyfinEnrollment *JellyfinEnrollment `json:"jellyfin_enrollment"`
+		Platform           string              `json:"platform"`
+		Label              string              `json:"label"`
+		TTLSeconds         int                 `json:"ttl_seconds"`
+		SubjectID          string              `json:"subject_id"`
+		ProfileID          string              `json:"profile_id"`
 		// KeyFingerprint binds the ticket to one device key (the fingerprint
 		// the device shows before enrolling); a stolen ticket is then useless.
 		KeyFingerprint string `json:"key_fingerprint"`
@@ -288,6 +289,10 @@ func (g *Gate) handleCreateTicket(w http.ResponseWriter, r *http.Request, key *A
 	}
 	if _, ok := platformKinds[req.Platform]; !ok {
 		writeError(w, http.StatusBadRequest, "platform must be one of android, firetv, webos, tizen, web, roku")
+		return
+	}
+	if err := validateJellyfinEnrollment(req.JellyfinEnrollment); err != nil {
+		writeError(w, 400, err.Error())
 		return
 	}
 	ttl := g.cfg.TicketTTL
@@ -302,7 +307,7 @@ func (g *Gate) handleCreateTicket(w http.ResponseWriter, r *http.Request, key *A
 	}
 	now := g.cfg.Now()
 	value := "lft_" + randomToken()
-	t := &Ticket{
+	t := &Ticket{JellyfinEnrollment: req.JellyfinEnrollment,
 		ID:        newID("tkt_"),
 		Hash:      hashToken(value),
 		Platform:  req.Platform,

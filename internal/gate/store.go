@@ -14,16 +14,19 @@ import (
 // Device is an enrolled client. PublicKey is the device's SPKI (ECDSA kind);
 // SealedSecret is its HMAC secret sealed under the master key (Roku).
 type Device struct {
-	ID           string     `json:"id"`
-	Name         string     `json:"name"`
-	Platform     string     `json:"platform"`
-	Kind         string     `json:"kind"`
-	PublicKey    []byte     `json:"public_key,omitempty"`
-	SealedSecret string     `json:"sealed_secret,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	EnrolledFrom string     `json:"enrolled_from"`
-	LastAuthAt   *time.Time `json:"last_auth_at,omitempty"`
-	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+	JellyfinEnrollment *JellyfinEnrollment `json:"jellyfin_enrollment,omitempty"`
+	JellyfinUserID     string              `json:"jellyfin_user_id,omitempty"`
+	JellyfinSetupState string              `json:"jellyfin_setup_state,omitempty"`
+	ID                 string              `json:"id"`
+	Name               string              `json:"name"`
+	Platform           string              `json:"platform"`
+	Kind               string              `json:"kind"`
+	PublicKey          []byte              `json:"public_key,omitempty"`
+	SealedSecret       string              `json:"sealed_secret,omitempty"`
+	CreatedAt          time.Time           `json:"created_at"`
+	EnrolledFrom       string              `json:"enrolled_from"`
+	LastAuthAt         *time.Time          `json:"last_auth_at,omitempty"`
+	RevokedAt          *time.Time          `json:"revoked_at,omitempty"`
 	// SubjectID is the device's owner; ProfileID its assigned policy profile
 	// ("" uses the global policy).
 	SubjectID string `json:"subject_id,omitempty"`
@@ -127,15 +130,16 @@ const (
 
 // Ticket is a pending one-time enrollment ticket. Only its hash is stored.
 type Ticket struct {
-	ID        string    `json:"id"`
-	SubjectID string    `json:"subject_id,omitempty"`
-	ProfileID string    `json:"profile_id,omitempty"`
-	Hash      string    `json:"hash"`
-	Platform  string    `json:"platform"`
-	Label     string    `json:"label"`
-	CreatedBy string    `json:"created_by"`
-	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
+	JellyfinEnrollment *JellyfinEnrollment `json:"jellyfin_enrollment,omitempty"`
+	ID                 string              `json:"id"`
+	SubjectID          string              `json:"subject_id,omitempty"`
+	ProfileID          string              `json:"profile_id,omitempty"`
+	Hash               string              `json:"hash"`
+	Platform           string              `json:"platform"`
+	Label              string              `json:"label"`
+	CreatedBy          string              `json:"created_by"`
+	CreatedAt          time.Time           `json:"created_at"`
+	ExpiresAt          time.Time           `json:"expires_at"`
 	// KeyFingerprint, if set, binds the ticket to one device key: only that
 	// key can enroll with it (stops a stolen ticket from being used).
 	KeyFingerprint string `json:"key_fingerprint,omitempty"`
@@ -157,10 +161,13 @@ type AdminKey struct {
 }
 
 type storeData struct {
-	Version     int    `json:"version"`
-	KeyCheck    string `json:"key_check"`
-	CACertPEM   string `json:"ca_cert_pem"`
-	CAKeySealed string `json:"ca_key_sealed"`
+	JellyfinAdmin *JellyfinAdminSettings      `json:"jellyfin_admin,omitempty"`
+	EmailSettings *emailSettings              `json:"email_settings,omitempty"`
+	Claims        map[string]*EnrollmentClaim `json:"enrollment_claims,omitempty"`
+	Version       int                         `json:"version"`
+	KeyCheck      string                      `json:"key_check"`
+	CACertPEM     string                      `json:"ca_cert_pem"`
+	CAKeySealed   string                      `json:"ca_key_sealed"`
 	// Key the Gate signs forwarded requests with; Jellyfin's Lanternfish
 	// plugin holds only the public half.
 	UpstreamPublicKey []byte               `json:"upstream_public_key,omitempty"`
