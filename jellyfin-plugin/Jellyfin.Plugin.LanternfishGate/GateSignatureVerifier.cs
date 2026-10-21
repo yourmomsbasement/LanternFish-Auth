@@ -1,10 +1,8 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
-using System.Threading;
 
 namespace Jellyfin.Plugin.LanternfishGate;
 
@@ -31,6 +29,9 @@ public enum VerifyResult
 
     /// <summary>Genuine, but the replay cache is full of unexpired nonces, so it can't be checked.</summary>
     Overloaded,
+
+    /// <summary>Genuine, but this device's share of the replay cache is full.</summary>
+    DeviceOverloaded,
 }
 
 /// <summary>
@@ -43,27 +44,20 @@ public sealed class GateSignatureVerifier : IDisposable
     public const string Context = "lanternfish-gate/v1/upstream\n";
 
     /// <summary>Default capacity of the replay cache.</summary>
-    public const int DefaultMaxNonces = 200_000;
+    public const int DefaultMaxNonces = ReplayCache.DefaultMaxNonces;
 
     private const string P256Oid = "1.2.840.10045.3.1.7";
-    private const int PruneIntervalSeconds = 10;
 
     private readonly ECDsa[] _keys;
     private readonly long _maxSkewSeconds;
-    private readonly int _maxNonces;
-    private readonly ConcurrentDictionary<string, long> _nonces = new(StringComparer.Ordinal);
-
-    // ConcurrentDictionary.Count takes every lock, so keep our own count.
-    private int _nonceCount;
-    private long _nextPrune;
-    private long _lastPrune = long.MinValue;
-    private int _pruning;
+    private readonly ReplayCache _nonces;
 
     /// <summary>Initializes a new instance of the <see cref="GateSignatureVerifier"/> class.</summary>
     /// <param name="base64Keys">Gate public keys, base64 SubjectPublicKeyInfo. More than one allows rotation.</param>
     /// <param name="maxSkew">How far a request's timestamp may be from this server's clock.</param>
-    /// <param name="maxNonces">Capacity of the replay cache.</param>
-    public GateSignatureVerifier(IEnumerable<string> base64Keys, TimeSpan maxSkew, int maxNonces = DefaultMaxNonces)
+    /// <param name="maxNonces">Capacity of a new replay cache, when <paramref name="cache"/> is null.</param>
+    /// <param name="cache">The replay cache, shared with the verifier this one replaces.</param>
+    public GateSignatureVerifier(IEnumerable<string> base64Keys, TimeSpan maxSkew, int maxNonces = DefaultMaxNonces, ReplayCache? cache = null)
     {
         var keys = new List<ECDsa>();
         foreach (var k in base64Keys)
@@ -78,11 +72,11 @@ public sealed class GateSignatureVerifier : IDisposable
 
         _keys = keys.ToArray();
         _maxSkewSeconds = (long)maxSkew.TotalSeconds;
-        _maxNonces = maxNonces;
+        _nonces = cache ?? new ReplayCache(maxNonces);
     }
 
     /// <summary>Gets the number of nonces in the replay cache.</summary>
-    public int NonceCount => Volatile.Read(ref _nonceCount);
+    public int NonceCount => _nonces.Count;
 
     /// <summary>Gets the number of configured keys.</summary>
     public int KeyCount => _keys.Length;
@@ -188,63 +182,15 @@ public sealed class GateSignatureVerifier : IDisposable
             return VerifyResult.BadSignature;
         }
 
-        // Only remember nonces of genuine requests, so junk can't fill the cache.
-        PruneNonces(nowSeconds);
-        if (_nonces.ContainsKey(nonce))
+        // Only remember nonces of genuine requests, so junk can't fill the
+        // cache; and count them against the device the Gate signed for.
+        return _nonces.TryAdd(nonce, deviceId, ts + _maxSkewSeconds, nowSeconds) switch
         {
-            return VerifyResult.Replayed;
-        }
-
-        // SECURITY: the cache is capped. When it is full of unexpired nonces,
-        // refuse rather than evict live entries, which would let their
-        // requests be replayed.
-        if (Interlocked.Increment(ref _nonceCount) > _maxNonces)
-        {
-            Interlocked.Decrement(ref _nonceCount);
-            return VerifyResult.Overloaded;
-        }
-
-        if (_nonces.TryAdd(nonce, ts + _maxSkewSeconds))
-        {
-            return VerifyResult.Ok;
-        }
-
-        Interlocked.Decrement(ref _nonceCount);
-        return VerifyResult.Replayed;
-    }
-
-    // Removes expired nonces every PruneIntervalSeconds, or sooner (at most
-    // once a second) while the cache is full. Only one prune runs at a time,
-    // so a full cache can't make every request scan it.
-    private void PruneNonces(long nowSeconds)
-    {
-        var full = Volatile.Read(ref _nonceCount) >= _maxNonces;
-        if (nowSeconds < Interlocked.Read(ref _nextPrune) && !(full && nowSeconds > Interlocked.Read(ref _lastPrune)))
-        {
-            return;
-        }
-
-        if (Interlocked.CompareExchange(ref _pruning, 1, 0) != 0)
-        {
-            return;
-        }
-
-        try
-        {
-            Interlocked.Exchange(ref _lastPrune, nowSeconds);
-            Interlocked.Exchange(ref _nextPrune, nowSeconds + PruneIntervalSeconds);
-            foreach (var entry in _nonces)
-            {
-                if (entry.Value < nowSeconds && _nonces.TryRemove(entry.Key, out _))
-                {
-                    Interlocked.Decrement(ref _nonceCount);
-                }
-            }
-        }
-        finally
-        {
-            Volatile.Write(ref _pruning, 0);
-        }
+            ReplayCache.Outcome.Added => VerifyResult.Ok,
+            ReplayCache.Outcome.Full => VerifyResult.Overloaded,
+            ReplayCache.Outcome.DeviceFull => VerifyResult.DeviceOverloaded,
+            _ => VerifyResult.Replayed,
+        };
     }
 
     /// <inheritdoc />
