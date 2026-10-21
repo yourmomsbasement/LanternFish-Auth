@@ -90,8 +90,9 @@ Gate, including requests made straight to port 8096.
 ### Enrolling a browser
 
 ```sh
-curl -X POST https://your.host/_lanternfish/admin/v1/tickets \
-  -H "Authorization: Bearer lfa_…" \
+read -rsp 'Admin key: ' K; echo     # not on the command line: history and ps keep those
+lf() { curl -s -H @<(printf 'Authorization: Bearer %s\n' "$K") "$@"; }
+lf -X POST https://your.host/_lanternfish/admin/v1/tickets \
   -d '{"platform":"web","label":"Office laptop"}'
 ```
 
@@ -106,7 +107,16 @@ the Jellyfin plugin, or by the Gate when the plugin doesn't (see
 ### Admin dashboard
 
 From a computer on an admin network (`LANTERNFISH_ADMIN_ALLOW`), open
-`https://your.host/_lanternfish/admin/` and paste an admin key. From there you
+`https://your.host:9443/_lanternfish/admin/` and paste an admin key.
+
+**Give the dashboard its own port** with `LANTERNFISH_ADMIN_LISTEN=:9443`
+(the example `gate.env` does), and open that port only to your admin PC.
+A different port is a different origin, so a script running in Jellyfin's
+web client (a malicious plugin or theme, or an injected script in metadata)
+can't read the dashboard or use your session. The main port then no longer
+serves the dashboard or accepts its session cookie; admin keys still work
+there. Without it the dashboard is at `https://your.host/_lanternfish/admin/`,
+and says it shares Jellyfin's origin. From there you
 can create enrollment tickets (with a QR code a phone can scan to enroll),
 see and revoke devices (or reset their enrollment), remove their approved
 networks, give one device its own policy, edit and publish access policies
@@ -126,12 +136,13 @@ bound to the network they were issued on, with a new network approved by a
 fresh key signature), fetch it, look at what it would do, and publish it:
 
 ```sh
-H='Authorization: Bearer lfa_…'; A=https://your.host/_lanternfish/admin/v2
-curl -s -H "$H" $A/policy/recommended > rec.json
-curl -s -H "$H" $A/policy | jq .global.version          # current version, e.g. 1
-jq '{policy: .policy}' rec.json | curl -s -H "$H" -X POST $A/policy/preview -d @-
+read -rsp 'Admin key: ' K; echo; A=https://your.host/_lanternfish/admin/v2
+lf() { curl -s -H @<(printf 'Authorization: Bearer %s\n' "$K") "$@"; }
+lf $A/policy/recommended > rec.json
+lf $A/policy | jq .global.version          # current version, e.g. 1
+jq '{policy: .policy}' rec.json | lf -X POST $A/policy/preview -d @-
 jq '{expected_version: 1, reason: "recommended policy", policy: .policy}' rec.json \
-  | curl -s -H "$H" -X PUT $A/policy -d @-
+  | lf -X PUT $A/policy -d @-
 ```
 
 Schedules, blackouts, per-device profiles and owners are described in

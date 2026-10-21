@@ -109,6 +109,36 @@ taken out.
 | N1 | Medium | Lowering the approval lifetime, remembered networks or session cap didn't touch existing approvals and sessions. | Publishing applies the new limits to existing state: approvals are shortened or dropped, sessions and grants on dropped networks end, and the oldest sessions beyond the cap end. Streams are then re-judged. |
 | N2 | Low | The updater's backup read at most 256 MiB, so a larger data file would have been backed up truncated without warning. | Over the limit the update stops with an error, before anything is changed. |
 
+## Review of main at 8355814 (2026-10-17)
+
+One high, six medium and eleven low findings, plus two informational notes.
+All are fixed except where noted. The Gate's regression tests started from
+the reviewer's probes and were checked to fail on the unfixed code (or with
+the fix taken out).
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| H1 | High | The dashboard shared Jellyfin's origin. A script running in Jellyfin's web client (a malicious plugin or theme, or a stored XSS) in an administrator's browser could fetch `GET /_lanternfish/admin/session` for the CSRF token and drive the admin API with the session cookie. CSRF tokens only stop other origins. | `LANTERNFISH_ADMIN_LISTEN` (`:9443` in the example `gate.env` and compose file) serves the dashboard on its own port, which is a separate origin. That listener serves only `/_lanternfish/admin…` and never proxies. In this mode the main listener no longer serves the dashboard and refuses dashboard cookies altogether, since browsers send cookies regardless of port. Admin keys still work on the main listener. The firewall generator opens the admin port to the admin PC only. Without the setting, the Gate logs a warning at startup and the dashboard shows one. |
+| M1 | Medium | The plugin's replay cache was a single global quota, so one device sending fast enough got every device `503`. | Each signed device ID gets a share (10,000 live nonces by default). A device over its share gets `429`; the others keep working. |
+| M2 | Medium | A `tickets`-only key (the Builder's) could mint a ticket for an admin-role owner, whose devices pass "admins only" app rules, and place it in any profile. | Tickets and email invitations for an admin owner need the `owners` scope. Choosing a profile needs `policy-write`, as assigning one later does. |
+| M3 | Medium | The hand-written `201.fw`/`202.fw` lacked the generator's `ipfilter` and IPSET, so a compromised guest could send as `10.20.0.2` and pass for the Gate. | `202.fw` carries `ipfilter: 1` and its own IPSET, and the guides say every guest on `vmbr1` needs the same (the generator adds them). |
+| M4 | Medium | `deploy/certs` (where compose reads the TLS key) wasn't in `.gitignore` or `.dockerignore`. | Both ignore it, and `.dockerignore` ignores `*.pem` and `*.key` too. |
+| M5 | Medium | `verify.sh` sent the admin key over TLS with verification off. | The key is sent only to a server presenting exactly the certificate installed in the Gate's container, checked on each connection. The script asks for the key (hidden) instead of taking it on the command line. |
+| M6 | Medium | Go 1.27.2 has GO-2026-6809 (crypto/x509), which is reachable from the FIDO metadata path. | Go 1.27.3. |
+| L1 | Low | A challenge's source wasn't checked when it was answered, and `client` isn't signed. Someone who read one browser sign-in could replay it from elsewhere as a native client and get a bearer token. | A challenge is answered only from the source it was issued to (an IPv4 address or IPv6 /64). One requested by the Gate's own page (`Sec-Fetch-Site: same-origin`) can't be exchanged for a native token. |
+| L2 | Low | `GET admin/v2/admin-keys` answered any key. | It needs the `owners` scope. |
+| L3 | Low | `GET admin/v2/subjects` returned the whole record: the sealed TOTP secret, passkey credentials and recovery-code hashes. | It returns a view: identity, role, status, and whether TOTP and passkeys are set up. |
+| L4 | Low | A plugin settings save built a fresh replay cache (a replay window) and never disposed of the old verifier's keys. | One cache for the plugin's life. The replaced verifier is disposed a minute later. |
+| L5 | Low | The plugin logged the decoded path, so `%0A` could forge log lines. | It logs the raw target, still percent-encoded, quoted and truncated. |
+| L6 | Low | The updater's webhook didn't suppress mentions. | `allowed_mentions: {"parse": []}`, as the Gate's alerts already did. |
+| L7 | Low | Dashboard sign-out had no CSRF or origin check. | It needs a same-origin JSON request. |
+| L8 | Low | The plugin's `/health` exemption compared the decoded path (`/he%61lth`), and trusted a loopback address that a forwarded-headers middleware could have set. | It compares the raw target exactly, and is off whenever `X-Forwarded-For`, `X-Original-For` or `Forwarded` is present. |
+| L9 | Low | Renewal-script injection keyed on the unsigned `X-Lanternfish-Auth` header. | Exactly one value, `cookie`, is required. The Gate always replaces the header. It controls only whether a script tag is added, never access, so it stays unsigned (see residual risks). |
+| L10 | Low | Actions, images and the Playwright install were pinned to mutable tags. | Actions are pinned to commit SHAs. The Go, distroless and Jellyfin images are pinned by digest (Jellyfin to 12.2, which the plugin targets). Playwright installs with `npm ci` from a committed lockfile (`scripts/browser-test`). |
+| L11 | Low | The docs piped `curl … \| bash` into a root shell and put admin keys on the command line. | Download, read, then run. The admin key is read hidden into a variable and passed to curl through `-H @<(printf …)`, so it stays out of history and `ps`. |
+| I1 | Info | The plugin warned only once when unconfigured. | The warning repeats every ten minutes. |
+| I2 | Info | Nothing tells the Gate that the plugin is missing. | Not changed in this round. `verify.sh` checks that Jellyfin refuses unsigned requests; rerun it after every Jellyfin update. |
+
 ## Reviewed, no change needed
 
 * **Credential handling:** tickets, admin keys and session tokens are 256-bit
@@ -143,5 +173,8 @@ taken out.
   open, but it cannot export the key.
 * **Per-IP limits are a speed bump** against distributed sources, as
   SECURITY.md says.
-* **GitHub Actions are pinned to tags, not commit SHAs.** Pinning to SHAs
-  would harden the release pipeline against a compromised action.
+* **`X-Lanternfish-Auth` is not signed.** It decides only whether the plugin
+  adds the renewal script to the web client page, never access (L9).
+* **Without `LANTERNFISH_ADMIN_LISTEN`** the dashboard shares Jellyfin's
+  origin (H1). This is kept for existing installs, and both the Gate and the
+  dashboard warn about it.

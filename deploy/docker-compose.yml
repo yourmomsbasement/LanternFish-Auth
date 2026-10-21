@@ -46,7 +46,10 @@ services:
       - jellyfin
 
   jellyfin:
-    image: jellyfin/jellyfin:latest
+    # Pinned (tag and digest): the plugin is built against Jellyfin 12.2, and
+    # an unpinned image can change under it. Update both together, then
+    # rerun the checks in deploy/proxmox/README.md ("Verify").
+    image: jellyfin/jellyfin:12.2.20261005-225228@sha256:357724bf0ae27a672c7cbaa899db2d9abeb13dbd8657ccce750258a4c059d037
     restart: unless-stopped
     # No "ports:" here, on purpose.
     volumes:

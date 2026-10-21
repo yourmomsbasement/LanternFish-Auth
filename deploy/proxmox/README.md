@@ -127,7 +127,10 @@ For an NVIDIA card, use a VM with PCI passthrough instead of this container.
 ```sh
 pct enter 202
 apt update && apt install -y curl
-curl -fsSL https://repo.jellyfin.org/install-debuntu.sh | bash
+# Download, read, then run: don't pipe a script from the internet into a root shell.
+curl -fsSLo /root/install-debuntu.sh https://repo.jellyfin.org/install-debuntu.sh
+less /root/install-debuntu.sh
+bash /root/install-debuntu.sh
 usermod -aG render jellyfin && systemctl restart jellyfin
 exit
 ```
@@ -183,8 +186,11 @@ the same way as Jellyfin, each on its own hostname:
 2. **Firewall it** like Jellyfin, so only the Gate reaches it: add it on the
    dashboard's Firewall tab, generate the script, and run it on this host
    (`DRY_RUN=1` first). Or by hand: copy `202.fw` to
-   `/etc/pve/firewall/<CT>.fw` and change the port in the `IN ACCEPT -source
-   10.20.0.2` rule to the application's (e.g. 8989).
+   `/etc/pve/firewall/<CT>.fw`, change the port in the `IN ACCEPT -source
+   10.20.0.2` rule to the application's (e.g. 8989), and the address in its
+   `[IPSET ipfilter-net0]` to the container's own. That `ipfilter` part
+   matters: without it a compromised container can send as `10.20.0.2`
+   and pass for the Gate with every other one.
 3. **DNS**: add the hostname (e.g. `sonarr.example.com`) with the same
    record as Jellyfin's.
 4. **Certificate**: add the hostname to the Gate's certificate, keeping the
@@ -284,10 +290,14 @@ pct exec 201 -- systemctl restart lanternfish-gate
    Firewall still lets you reach the web UI (port 8006) and SSH from your LAN.
    Keep a console open in case it doesn't.
 2. Generate the rules on the dashboard's **Firewall** tab and run the script
-   on this host (`DRY_RUN=1 bash lanternfish-firewall.sh` first). Or copy
-   [`201.fw`](201.fw) to `/etc/pve/firewall/201.fw` and [`202.fw`](202.fw)
-   to `/etc/pve/firewall/202.fw` by hand, and edit the admin PC address in
-   `201.fw`.
+   on this host (`DRY_RUN=1 bash lanternfish-firewall.sh` first). Set the
+   admin dashboard port (9443, `LANTERNFISH_ADMIN_LISTEN`) and your admin
+   PC there. The templates [`201.fw`](201.fw) and [`202.fw`](202.fw) are
+   the same rules for just these two containers, if you'd rather copy them
+   to `/etc/pve/firewall/` by hand: edit the admin PC address in `201.fw`.
+   **Every** container on vmbr1 needs the `ipfilter` lines `202.fw` has
+   (with its own address), or one compromised container can pose as the
+   Gate to the others; the generator adds them for every guest.
 3. Both containers' NICs were created with `firewall=1`. Confirm under each
    CT → Network.
 
@@ -330,8 +340,11 @@ Jellyfin, confirms tickets and signatures can't be reused, then revokes the
 device and confirms it's locked out.
 
 ```sh
-ADMIN_KEY='lfa_…' GATE=201 JF=202 GATE_IP=192.168.1.20 bash verify.sh
+GATE=201 JF=202 GATE_IP=192.168.1.20 bash verify.sh
 ```
+
+It asks for the admin key (leave it blank to skip the round trip), and sends
+it only to a server presenting the certificate installed in CT 201.
 
 Every line should read PASS or WARN, and it exits non-zero on any FAIL.
 Rerun it after every Jellyfin or Gate update. If an update ever stops the
@@ -350,7 +363,9 @@ device outside your network.
 | CT 202 | `pct exec 202 -- curl -m 5 http://192.168.1.1` | timeout (Jellyfin can't reach LAN) |
 | Phone on mobile data | `https://jellyfin.example.com/System/Info/Public` | `{"error":"lanternfish_auth_required"}` |
 | Phone on mobile data | `https://jellyfin.example.com/_lanternfish/admin/v1/devices` | `404` |
-| Admin PC | `curl -H "Authorization: Bearer lfa_…" https://jellyfin.example.com/_lanternfish/admin/v1/devices` | device list |
+| Admin PC | `read -rs K; curl -H @<(printf 'Authorization: Bearer %s\n' "$K") https://jellyfin.example.com/_lanternfish/admin/v1/devices` | device list |
+| Admin PC | `https://192.168.1.20:9443/_lanternfish/admin/` in a browser | dashboard |
+| Phone on mobile data | `https://jellyfin.example.com:9443/` | no connection |
 
 ## Backups and updates
 
