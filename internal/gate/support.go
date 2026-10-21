@@ -530,6 +530,8 @@ type challenge struct {
 	deviceID string
 	source   string
 	expires  time.Time
+	// gatePage: requested by the Gate's own sign-in page (a browser).
+	gatePage bool
 }
 
 func newChallengeTable(max, maxPerSource int) *challengeTable {
@@ -545,7 +547,7 @@ func (t *challengeTable) drop(value string, c challenge) {
 	}
 }
 
-func (t *challengeTable) issue(deviceID, source string, now time.Time, ttl time.Duration) (string, time.Time, bool) {
+func (t *challengeTable) issue(deviceID, source string, gatePage bool, now time.Time, ttl time.Duration) (string, time.Time, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.items) >= t.max || t.bySource[source] >= t.maxPerSource {
@@ -560,13 +562,20 @@ func (t *challengeTable) issue(deviceID, source string, now time.Time, ttl time.
 	}
 	value := encodeB64(randomBytes(32))
 	exp := now.Add(ttl)
-	t.items[value] = challenge{deviceID: deviceID, source: source, expires: exp}
+	t.items[value] = challenge{deviceID: deviceID, source: source, expires: exp, gatePage: gatePage}
 	t.bySource[source]++
 	return value, exp, true
 }
 
 // consume removes the challenge whatever the outcome, so it can be tried once.
-func (t *challengeTable) consume(value, deviceID string, now time.Time) bool {
+//
+// SECURITY (L1): the signature covers the device and the challenge, not
+// where it is sent from or what it is exchanged for. So a challenge is
+// answered only from the source it was issued to, and one the Gate's own
+// page asked for (a browser) can't be exchanged for a native client's bearer
+// token. Someone who reads one sign-in request (a TLS-inspecting proxy)
+// can't replay it elsewhere for a token.
+func (t *challengeTable) consume(value, deviceID, source, client string, now time.Time) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c, ok := t.items[value]
@@ -574,7 +583,7 @@ func (t *challengeTable) consume(value, deviceID string, now time.Time) bool {
 		return false
 	}
 	t.drop(value, c)
-	return c.deviceID == deviceID && now.Before(c.expires)
+	return c.deviceID == deviceID && now.Before(c.expires) && c.source == source && !(c.gatePage && client != "browser")
 }
 
 // sourceKey groups addresses one client is likely to control: an IPv4

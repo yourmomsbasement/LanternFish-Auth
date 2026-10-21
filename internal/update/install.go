@@ -615,7 +615,9 @@ func Webhook(url string) func(string) {
 		return nil
 	}
 	return func(msg string) {
-		body, _ := json.Marshal(map[string]string{"content": msg})
+		// SECURITY (L6): release notes and error text end up in msg; no
+		// @everyone or role pings from them, as the Gate's alerts.
+		body, _ := json.Marshal(map[string]any{"content": msg, "allowed_mentions": map[string]any{"parse": []string{}}})
 		c := &http.Client{Timeout: 10 * time.Second}
 		if resp, err := c.Post(url, "application/json", bytes.NewReader(body)); err == nil {
 			resp.Body.Close()

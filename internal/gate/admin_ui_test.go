@@ -122,7 +122,7 @@ func TestDashboardSession(t *testing.T) {
 func TestDashboardSignOut(t *testing.T) {
 	h := newHarness(t)
 	cookie, _ := h.dashboardSignIn()
-	h.dashboard(testClientAddr, "POST", "/_lanternfish/admin/logout", nil, map[string]string{"Cookie": cookie})
+	h.dashboard(testClientAddr, "POST", "/_lanternfish/admin/logout", map[string]any{}, map[string]string{"Cookie": cookie})
 	if rec := h.dashboard(testClientAddr, "GET", "/_lanternfish/admin/session", nil, map[string]string{"Cookie": cookie}); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("after sign-out: %d", rec.Code)
 	}

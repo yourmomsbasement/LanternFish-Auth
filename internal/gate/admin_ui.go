@@ -201,11 +201,13 @@ func (g *Gate) handleAdminSignIn(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode, MaxAge: int(adminMaxLife.Seconds())})
 	g.audit.write(now, "admin_signed_in", map[string]any{"admin_key": key.Name, "ip": ip})
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"name": key.Name, "csrf": csrf, "idle_seconds": int(adminIdle.Seconds())})
+	writeJSON(w, http.StatusOK, map[string]any{"name": key.Name, "csrf": csrf, "idle_seconds": int(adminIdle.Seconds()),
+		"public_origin_hint": g.publicOriginHint(r), "separate_origin": g.cfg.AdminListen != ""})
 }
 
 func (g *Gate) handleAdminWhoAmI(w http.ResponseWriter, r *http.Request, key *AdminKey) {
-	out := map[string]any{"name": key.Name, "idle_seconds": int(adminIdle.Seconds())}
+	out := map[string]any{"name": key.Name, "idle_seconds": int(adminIdle.Seconds()),
+		"public_origin_hint": g.publicOriginHint(r), "separate_origin": g.cfg.AdminListen != ""}
 	if c, err := r.Cookie(adminCookie); err == nil {
 		if s, ok := g.adminSessions.use(c.Value, clientIP(r), g.cfg.Now()); ok {
 			out["csrf"] = s.csrf
@@ -217,6 +219,13 @@ func (g *Gate) handleAdminWhoAmI(w http.ResponseWriter, r *http.Request, key *Ad
 func (g *Gate) handleAdminSignOut(w http.ResponseWriter, r *http.Request) {
 	if !g.adminAllowed(clientIP(r)) {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	// SECURITY: like sign-in, only from the dashboard page itself, so a
+	// sibling site can't sign the administrator out (SameSite=Strict lets
+	// same-site requests through).
+	if crossSite(r) || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		writeError(w, http.StatusForbidden, "sign out from the dashboard page")
 		return
 	}
 	if c, err := r.Cookie(adminCookie); err == nil {
@@ -231,7 +240,7 @@ func (g *Gate) handleAdminSignOut(w http.ResponseWriter, r *http.Request) {
 // header too.
 func (g *Gate) adminFromCookie(r *http.Request) (*AdminKey, *adminSession, string) {
 	c, err := r.Cookie(adminCookie)
-	if err != nil {
+	if err != nil || !g.dashboardCookiesAllowed(r) {
 		return nil, nil, ""
 	}
 	s, ok := g.adminSessions.use(c.Value, clientIP(r), g.cfg.Now())

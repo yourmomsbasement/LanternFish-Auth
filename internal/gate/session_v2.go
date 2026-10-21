@@ -34,7 +34,7 @@ func keyFingerprint(spki []byte) string {
 // the failure and returns nil.
 func (g *Gate) proveDevice(w http.ResponseWriter, r *http.Request, req sessionRequest, now time.Time) *Device {
 	fields := map[string]any{"device_id": req.DeviceID}
-	if !g.challenges.consume(req.Challenge, req.DeviceID, now) {
+	if !g.challenges.consume(req.Challenge, req.DeviceID, sourceKey(clientIP(r)), req.Client, now) {
 		g.fail(w, r, http.StatusUnauthorized, "session_failed", "challenge invalid, used or expired", fields)
 		return nil
 	}

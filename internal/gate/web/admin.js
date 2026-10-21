@@ -347,13 +347,16 @@
     flash(msg || "", !!msg);
     document.getElementById("key").focus();
   }
+  var originHint = "";
   function signedIn(data) {
     csrf = data.csrf || "";
+    originHint = data.public_origin_hint || "";
     signin.hidden = true;
     document.getElementById("key").value = "";
     document.getElementById("nav").hidden = false;
     document.getElementById("signout").hidden = false;
-    document.getElementById("who").textContent = "Signed in as " + data.name;
+    document.getElementById("who").textContent = "Signed in as " + data.name + (data.separate_origin === false ?
+      " (this dashboard shares Jellyfin's address; set LANTERNFISH_ADMIN_LISTEN to give it its own)" : "");
     flash("");
     go(location.hash.slice(1) || "devices");
   }
@@ -363,7 +366,7 @@
       .then(signedIn, function (err) { flash(err.message, true); });
   });
   document.getElementById("signout").addEventListener("click", function () {
-    api("POST", UI + "logout").then(function () { showSignIn(""); }, fail);
+    api("POST", UI + "logout", {}).then(function () { showSignIn(""); }, fail);
   });
 
   // ---- navigation ----
@@ -554,7 +557,8 @@
   // ---- tickets ----
 
   function publicOrigin() {
-    try { return localStorage.getItem("lf-public-origin") || location.origin; } catch (e) { return location.origin; }
+    var fallback = originHint || location.origin;
+    try { return localStorage.getItem("lf-public-origin") || fallback; } catch (e) { return fallback; }
   }
 
   function drawQR(text) {
@@ -1246,6 +1250,7 @@
       var fresh = !data.plan;
       p.guests = p.guests || [];
       p.gate.ssh_from = p.gate.ssh_from || [];
+      p.gate.admin_from = p.gate.admin_from || [];
       var out = h("div"), warnBox = h("div");
 
       function num(obj, key, attrs) {
@@ -1294,7 +1299,10 @@
         h("div", { class: "row" },
           field("Internal network", text(p, "internal_net", { placeholder: "10.20.0.0/24", size: "16" })),
           field("SSH allowed from", list(g, "ssh_from", { placeholder: "192.168.1.10", size: "30" }), "addresses or networks; empty: no SSH"),
-          check(g, "allow_ping", "Answer ping")));
+          check(g, "allow_ping", "Answer ping")),
+        h("div", { class: "row" },
+          field("Admin dashboard port", num(g, "admin_port", { min: 0, max: 65535, placeholder: "0" }), "0: none; match LANTERNFISH_ADMIN_LISTEN"),
+          field("Admin dashboard from", list(g, "admin_from", { placeholder: "192.168.1.10", size: "30" }), "your admin PC")));
 
       var isolationCard = h("div", { class: "card" }, h("h2", { text: "Optional LAN isolation" }),
         h("p", { class: "muted small", text: "These blocks apply to guests with Keep it off my LAN enabled. Explicit guest, internal service and external target allowances take precedence." }),

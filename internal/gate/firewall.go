@@ -49,6 +49,10 @@ type FirewallGate struct {
 	// SSHFrom are the addresses or networks allowed to SSH to the Gate.
 	SSHFrom   []string `json:"ssh_from"`
 	AllowPing bool     `json:"allow_ping"`
+	// AdminPort is the dashboard's own listener (LANTERNFISH_ADMIN_LISTEN),
+	// opened only to AdminFrom. 0: none.
+	AdminPort int      `json:"admin_port,omitempty"`
+	AdminFrom []string `json:"admin_from,omitempty"`
 }
 
 // FirewallGuest is a container or VM behind the Gate.
@@ -216,6 +220,22 @@ func (p *FirewallPlan) validate() []string {
 			bad("SSH: %v", err)
 		} else {
 			g.SSHFrom[i] = v
+		}
+	}
+	if g.AdminPort < 0 || g.AdminPort > 65535 {
+		bad("the admin port must be 0 (none) or 1-65535")
+	}
+	if g.AdminPort != 0 && (g.AdminPort == g.PublicPort || g.AdminPort == 22 || g.AdminPort == g.ServicePort) {
+		bad("the admin port must differ from the public, SSH and service ports")
+	}
+	if g.AdminPort != 0 && len(g.AdminFrom) == 0 {
+		bad("the admin port needs the addresses it accepts (your admin PC)")
+	}
+	for i, s := range g.AdminFrom {
+		if v, err := fwSource(s); err != nil {
+			bad("admin: %v", err)
+		} else {
+			g.AdminFrom[i] = v
 		}
 	}
 	var internal netip.Prefix
@@ -557,6 +577,11 @@ func (p *FirewallPlan) gateFile() string {
 	fmt.Fprintf(&b, "IN ACCEPT -i %s -p tcp -dport %d -log nolog # HTTPS: the only public entry point\n", g.LANNIC, g.PublicPort)
 	for _, s := range g.SSHFrom {
 		fmt.Fprintf(&b, "IN ACCEPT -i %s -source %s -p tcp -dport 22 -log nolog # SSH\n", g.LANNIC, s)
+	}
+	if g.AdminPort != 0 {
+		for _, s := range g.AdminFrom {
+			fmt.Fprintf(&b, "IN ACCEPT -i %s -source %s -p tcp -dport %d -log nolog # admin dashboard\n", g.LANNIC, s, g.AdminPort)
+		}
 	}
 	if g.ServicePort != 0 {
 		for _, x := range p.Guests {

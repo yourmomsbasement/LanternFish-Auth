@@ -418,12 +418,31 @@ func (g *Gate) handleDeleteProfile(w http.ResponseWriter, r *http.Request, key *
 
 // ---- Subjects ----
 
+// subjectView is what the admin API shows of an owner. SECURITY: never the
+// factors themselves (sealed TOTP secret, passkey credentials, recovery-code
+// hashes): a monitoring key has no use for them. The factors endpoint shows
+// their status.
+type subjectView struct {
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Role           string    `json:"role"`
+	Status         string    `json:"status"`
+	CreatedAt      time.Time `json:"created_at"`
+	JellyfinUserID string    `json:"jellyfin_user_id,omitempty"`
+	HasTOTP        bool      `json:"has_totp"`
+	PasskeyCount   int       `json:"passkey_count"`
+}
+
+func viewSubject(s *Subject) *subjectView {
+	return &subjectView{ID: s.ID, Name: s.Name, Role: s.Role, Status: s.Status, CreatedAt: s.CreatedAt,
+		JellyfinUserID: s.JellyfinUserID, HasTOTP: s.TOTP != nil, PasskeyCount: len(s.Passkeys)}
+}
+
 func (g *Gate) handleListSubjects(w http.ResponseWriter, r *http.Request, _ *AdminKey) {
-	out := []*Subject{}
+	out := []*subjectView{}
 	g.store.View(func(d *storeData) {
 		for _, s := range d.Subjects {
-			c := *s
-			out = append(out, &c)
+			out = append(out, viewSubject(s))
 		}
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
@@ -459,7 +478,7 @@ func (g *Gate) handleCreateSubject(w http.ResponseWriter, r *http.Request, key *
 		return
 	}
 	g.audit.write(now, "subject_created", map[string]any{"subject_id": s.ID, "name": s.Name, "admin_key": key.Name, "ip": clientIP(r)})
-	writeJSON(w, http.StatusCreated, s)
+	writeJSON(w, http.StatusCreated, viewSubject(s))
 }
 
 // handleSubjectStatus disables or re-enables a subject. Disabling ends its
