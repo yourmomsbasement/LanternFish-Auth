@@ -9,3 +9,7 @@ obj/
 
 # Python deployment helper caches
 __pycache__/
+
+# TLS certificates and keys for docker-compose (deploy/docker-compose.yml)
+/deploy/certs/
+node_modules/

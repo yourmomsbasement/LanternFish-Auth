@@ -39,7 +39,11 @@ public static class SessionRenewal
     /// <returns>True to add the script.</returns>
     public static bool Applies(HttpRequest request) =>
         HttpMethods.IsGet(request.Method)
-        && string.Equals(request.Headers[AuthHeader].ToString(), "cookie", StringComparison.Ordinal)
+        // The Gate sets this header (replacing any the client sent); it isn't
+        // signed, so take only a single exact value. It decides only whether
+        // a script is added to the page, never access (L9).
+        && request.Headers[AuthHeader].Count == 1
+        && string.Equals(request.Headers[AuthHeader][0], "cookie", StringComparison.Ordinal)
         && _webIndex.IsMatch((request.PathBase + request.Path).Value ?? string.Empty);
 
     /// <summary>Runs the rest of the pipeline and adds the script to its HTML.</summary>

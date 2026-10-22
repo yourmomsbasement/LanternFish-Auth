@@ -115,7 +115,10 @@ func (g *Gate) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Issued for unknown IDs too, so this can't be used to probe for devices.
-	value, exp, ok := g.challenges.issue(req.DeviceID, sourceKey(clientIP(r)), g.cfg.Now(), g.cfg.ChallengeTTL)
+	// The Gate's sign-in page fetches from its own origin; native clients
+	// send no Sec-Fetch headers, and an app in a web view isn't same-origin.
+	gatePage := r.Header.Get("Sec-Fetch-Site") == "same-origin"
+	value, exp, ok := g.challenges.issue(req.DeviceID, sourceKey(clientIP(r)), gatePage, g.cfg.Now(), g.cfg.ChallengeTTL)
 	if !ok {
 		w.Header().Set("Retry-After", fmt.Sprint(int(g.cfg.ChallengeTTL.Seconds())))
 		writeError(w, http.StatusTooManyRequests, "too many outstanding challenges")
@@ -207,6 +210,28 @@ var sensitiveScopes = map[string]bool{scopePolicyWrite: true, scopeOwners: true,
 
 // recentVerification is how long a dashboard re-verification lasts.
 const recentVerification = 5 * time.Minute
+
+// enrollmentScopeNeeded is the scope key lacks to enroll a device for owner
+// in profile, or "".
+//
+// SECURITY (M2): the tickets scope (what the Builder's packaged key holds)
+// enrolls devices for ordinary owners in their default profile. A device for
+// an admin owner (which passes "admins only" app rules) needs the owners
+// scope, and choosing its profile needs policy-write, as assigning one later
+// does.
+func enrollmentScopeNeeded(key *AdminKey, owner *Subject, profileID string) string {
+	if owner.Role == "admin" && !key.hasScope(scopeOwners) {
+		return scopeOwners
+	}
+	if profileID != "" && !key.hasScope(scopePolicyWrite) {
+		return scopePolicyWrite
+	}
+	return ""
+}
+
+type scopeError struct{ scope string }
+
+func (e *scopeError) Error() string { return "scope required: " + e.scope }
 
 func (k *AdminKey) hasScope(scope string) bool {
 	if scope == scopeAny || k.Scopes == nil {
@@ -329,17 +354,26 @@ func (g *Gate) handleCreateTicket(w http.ResponseWriter, r *http.Request, key *A
 	}
 	errSubject := errors.New("no such subject")
 	errProfile := errors.New("no such profile")
+	var errScope error
 	if err := g.store.Update(func(d *storeData) error {
-		if s := d.Subjects[t.SubjectID]; s == nil || s.Status != "active" {
+		s := d.Subjects[t.SubjectID]
+		if s == nil || s.Status != "active" {
 			return errSubject
 		}
 		if t.ProfileID != "" && d.Profiles[t.ProfileID] == nil {
 			return errProfile
 		}
+		if missing := enrollmentScopeNeeded(key, s, t.ProfileID); missing != "" {
+			errScope = &scopeError{missing}
+			return errScope
+		}
 		d.pruneTickets(now)
 		d.Tickets[t.ID] = t
 		return nil
-	}); errors.Is(err, errSubject) {
+	}); errScope != nil && errors.Is(err, errScope) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "scope_required", "scope": errScope.(*scopeError).scope})
+		return
+	} else if errors.Is(err, errSubject) {
 		writeError(w, http.StatusBadRequest, "subject_id is not an active subject")
 		return
 	} else if errors.Is(err, errProfile) {

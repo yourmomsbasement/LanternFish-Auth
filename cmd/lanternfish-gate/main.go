@@ -57,6 +57,8 @@ Environment:
   LANTERNFISH_LISTEN             listen address (default :8443)
   LANTERNFISH_SERVICE_NETWORK    isolated private subnet (e.g. 10.20.0.0/24)
   LANTERNFISH_SERVICE_LISTEN     optional private IP:port for backend Jellyfin access
+  LANTERNFISH_ADMIN_LISTEN       recommended: separate port for the admin dashboard (e.g. :9443),
+                                 so Jellyfin's scripts can't reach it
   LANTERNFISH_SERVICE_CLIENTS    allowed backend peers: seerr=10.20.0.4,...
   LANTERNFISH_SERVICE_CLIENTS_FILE optional JSON clients, permissions and limits
   LANTERNFISH_SERVICE_AUTH       ip (default) or mtls
@@ -296,6 +298,10 @@ func serve() error {
 	cfg.Updates = gateUpdates()
 	cfg.ProbationPath = probationPath()
 	cfg.Listen = env("LANTERNFISH_LISTEN", ":8443")
+	cfg.AdminListen = os.Getenv("LANTERNFISH_ADMIN_LISTEN")
+	if cfg.AdminListen != "" && (cfg.AdminListen == cfg.Listen || cfg.AdminListen == cfg.ServiceListen) {
+		return errors.New("LANTERNFISH_ADMIN_LISTEN must be a different address from LANTERNFISH_LISTEN and LANTERNFISH_SERVICE_LISTEN")
+	}
 	cfg.TLSCertFile = certFile
 	if p := cfg.Updates; p != nil {
 		switch p.AutoPolicy {
@@ -321,8 +327,30 @@ func serve() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	var serviceServer *http.Server
+	var serviceServer, adminServer *http.Server
 	serviceErrors := make(chan error, 1)
+	adminErrors := make(chan error, 1)
+	if cfg.AdminListen != "" {
+		// SECURITY (H1): the dashboard on its own port is its own origin, so
+		// scripts served by Jellyfin can't read the dashboard's pages or
+		// CSRF token. It serves only the admin paths and never proxies.
+		listener, err := net.Listen("tcp", cfg.AdminListen)
+		if err != nil {
+			return fmt.Errorf("admin listener: %w", err)
+		}
+		defer listener.Close()
+		adminServer = &http.Server{Addr: cfg.AdminListen, Handler: g.AdminHandler(), TLSConfig: g.TLSConfig(certs.GetCertificate), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
+		defer adminServer.Close()
+		go func() {
+			if err := adminServer.ServeTLS(listener, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				adminErrors <- err
+				stop()
+			}
+		}()
+		log.Printf("admin dashboard on its own origin, listening on %s (path /_lanternfish/admin/)", cfg.AdminListen)
+	} else {
+		log.Printf("WARNING: the admin dashboard shares an origin with Jellyfin; any script Jellyfin serves can act as a signed-in administrator. Set LANTERNFISH_ADMIN_LISTEN (for example :9443) to give it its own")
+	}
 	if cfg.ServiceListen != "" {
 		serviceTLS, err := g.ServiceTLSConfig()
 		if err != nil {
@@ -363,6 +391,11 @@ func serve() error {
 					serviceServer.Close()
 				}
 			}
+			if adminServer != nil {
+				if err := adminServer.Shutdown(shutdown); err != nil {
+					adminServer.Close()
+				}
+			}
 		}()
 		if err := srv.Shutdown(shutdown); err != nil {
 			srv.Close()
@@ -385,6 +418,8 @@ func serve() error {
 	select {
 	case err := <-serviceErrors:
 		return fmt.Errorf("internal service listener: %w", err)
+	case err := <-adminErrors:
+		return fmt.Errorf("admin listener: %w", err)
 	default:
 	}
 	return nil

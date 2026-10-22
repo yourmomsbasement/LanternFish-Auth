@@ -82,6 +82,10 @@ type Config struct {
 	Listen      string
 	TLSCertFile string
 
+	// AdminListen, when set, serves the dashboard on its own port, a
+	// different origin from Jellyfin's (see AdminHandler).
+	AdminListen string
+
 	// Optional internal-only Jellyfin service route; restart to change.
 	ServiceNetwork           string
 	ServiceListen            string
@@ -415,6 +419,10 @@ func (g *Gate) routes() http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Strict-Transport-Security", hstsValue)
+		if g.cfg.AdminListen != "" && !viaAdminListener(r) && isDashboardPath(r.URL.Path) {
+			writeError(w, http.StatusNotFound, "not found") // the dashboard lives on the admin listener
+			return
+		}
 		if g.store.readOnly.Load() && changesState(r) {
 			w.Header().Set("Retry-After", "30")
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "temporarily_unavailable",

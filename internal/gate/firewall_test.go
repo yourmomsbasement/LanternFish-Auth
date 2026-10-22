@@ -157,18 +157,21 @@ func TestFirewallDuplicateAddresses(t *testing.T) {
 
 func TestFirewallRejectsShellInjection(t *testing.T) {
 	for name, mutate := range map[string]func(*FirewallPlan){
-		"name":    func(p *FirewallPlan) { p.Guests[0].Name = "x'; rm -rf / #" },
-		"ip":      func(p *FirewallPlan) { p.Guests[0].IP = "10.20.0.3; reboot" },
-		"source":  func(p *FirewallPlan) { p.Guests[0].Sources = []string{"$(id)"} },
-		"ssh":     func(p *FirewallPlan) { p.Gate.SSHFrom = []string{"`id`"} },
-		"nic":     func(p *FirewallPlan) { p.Gate.LANNIC = "net0 -p tcp" },
-		"heredoc": func(p *FirewallPlan) { p.Guests[0].Name = "a\nLANTERNFISH_FW\nreboot" },
-		"id":      func(p *FirewallPlan) { p.Guests[0].ID = 5 },
-		"port":    func(p *FirewallPlan) { p.Guests[0].Ports = []int{70000} },
-		"kind":    func(p *FirewallPlan) { p.Guests[0].Kind = "ct; reboot" },
-		"dup id":  func(p *FirewallPlan) { p.Guests[1].ID = 201 },
-		"dup ip":  func(p *FirewallPlan) { p.Guests[1].IP = p.Guests[0].IP },
-		"talks":   func(p *FirewallPlan) { p.Guests[1].TalksTo = []string{"Nobody"} },
+		"name":              func(p *FirewallPlan) { p.Guests[0].Name = "x'; rm -rf / #" },
+		"ip":                func(p *FirewallPlan) { p.Guests[0].IP = "10.20.0.3; reboot" },
+		"source":            func(p *FirewallPlan) { p.Guests[0].Sources = []string{"$(id)"} },
+		"ssh":               func(p *FirewallPlan) { p.Gate.SSHFrom = []string{"`id`"} },
+		"admin":             func(p *FirewallPlan) { p.Gate.AdminPort, p.Gate.AdminFrom = 9443, []string{"$(id)"} },
+		"admin open to all": func(p *FirewallPlan) { p.Gate.AdminPort = 9443 },
+		"admin on 443":      func(p *FirewallPlan) { p.Gate.AdminPort, p.Gate.AdminFrom = 443, []string{"192.168.1.10"} },
+		"nic":               func(p *FirewallPlan) { p.Gate.LANNIC = "net0 -p tcp" },
+		"heredoc":           func(p *FirewallPlan) { p.Guests[0].Name = "a\nLANTERNFISH_FW\nreboot" },
+		"id":                func(p *FirewallPlan) { p.Guests[0].ID = 5 },
+		"port":              func(p *FirewallPlan) { p.Guests[0].Ports = []int{70000} },
+		"kind":              func(p *FirewallPlan) { p.Guests[0].Kind = "ct; reboot" },
+		"dup id":            func(p *FirewallPlan) { p.Guests[1].ID = 201 },
+		"dup ip":            func(p *FirewallPlan) { p.Guests[1].IP = p.Guests[0].IP },
+		"talks":             func(p *FirewallPlan) { p.Guests[1].TalksTo = []string{"Nobody"} },
 		"egress": func(p *FirewallPlan) {
 			p.Guests[0].Egress = []EgressTarget{{IP: "$(id)", Protocol: "tcp", Ports: []int{445}}}
 		},
@@ -580,3 +583,16 @@ func TestFirewallScriptWrapperTargets(t *testing.T) {
 }
 
 // The script runs: against stand-ins for pct, qm and pve-firewall.
+
+// H1: the dashboard's own port is opened only to the admin PC.
+func TestFirewallAdminPort(t *testing.T) {
+	p := testPlan()
+	p.Gate.AdminPort, p.Gate.AdminFrom = 9443, []string{"192.168.1.10"}
+	if probs := p.validate(); len(probs) != 0 {
+		t.Fatal(probs)
+	}
+	f := p.gateFile()
+	if !strings.Contains(f, "IN ACCEPT -i net0 -source 192.168.1.10 -p tcp -dport 9443 -log nolog # admin dashboard\n") || strings.Count(f, "9443") != 1 {
+		t.Fatalf("gate file:\n%s", f)
+	}
+}

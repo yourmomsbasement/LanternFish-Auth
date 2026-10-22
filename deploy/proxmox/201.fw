@@ -10,4 +10,5 @@ policy_out: ACCEPT
 [RULES]
 IN ACCEPT -i net0 -p tcp -dport 443 -log nolog # HTTPS: the only public entry point
 IN ACCEPT -i net0 -source 192.168.1.10 -p tcp -dport 22 -log nolog # SSH from the admin PC
+IN ACCEPT -i net0 -source 192.168.1.10 -p tcp -dport 9443 -log nolog # admin dashboard (LANTERNFISH_ADMIN_LISTEN)
 IN ACCEPT -i net0 -p icmp -log nolog # ping

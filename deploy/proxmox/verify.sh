@@ -2,14 +2,18 @@
 # Checks a Lanternfish deployment on Proxmox end to end. Run on the Proxmox
 # host as root:
 #
-#   ADMIN_KEY=lfa_… GATE=200 JF=201 GATE_IP=192.168.1.20 bash verify.sh
+#   GATE=200 JF=201 GATE_IP=192.168.1.20 bash verify.sh
+#
+# It asks for an admin key (input hidden) for the round trip. Don't put the
+# key on the command line, where shell history and ps would keep it.
 #
 # GATE / JF   container IDs of the Gate and Jellyfin (defaults 201 / 202)
 # GATE_IP     the Gate's LAN address
 # JF_IP       Jellyfin's internal address (default 10.20.0.3)
-# ADMIN_KEY   an admin key; enables the round trip through the Gate. The host
-#             must be inside LANTERNFISH_ADMIN_ALLOW. Without it, that part
-#             is skipped.
+# ADMIN_KEY   (asked for) an admin key; enables the round trip through the
+#             Gate. The host must be inside LANTERNFISH_ADMIN_ALLOW. Leave it
+#             blank to skip that part. The key is sent only to a server
+#             presenting the certificate installed in the Gate's container.
 #
 # The round trip enrolls a temporary Roku-type device, uses it, then revokes
 # it. It costs two deliberate failed attempts against this host's rate limit
@@ -26,6 +30,10 @@ JF=${JF:-202}
 JF_IP=${JF_IP:-10.20.0.3}
 GATE_IP=${GATE_IP:-}
 ADMIN_KEY=${ADMIN_KEY:-}
+if [ -z "$ADMIN_KEY" ] && [ -t 0 ]; then
+  read -rsp "Admin key for the round trip (blank to skip): " ADMIN_KEY
+  echo
+fi
 
 fails=0
 warns=0
@@ -139,25 +147,37 @@ if [ -z "$ADMIN_KEY" ]; then
   warn "Skipped. Set ADMIN_KEY=lfa_… to enroll, use and revoke a temporary device"
 elif [ -z "$GATE_IP" ]; then
   fail "Skipped: no Gate address. Rerun with GATE_IP=<address>"
+elif ! der=$(in_gate sh -c '. /etc/lanternfish/gate.env && cat "$LANTERNFISH_TLS_CERT"' 2>/dev/null | openssl x509 -outform DER 2>/dev/null | base64 -w0) ||
+  [ -z "$der" ] || ! pin=$(printf '%s' "$der" | base64 -d | sha256sum | cut -d' ' -f1); then
+  fail "Skipped: couldn't read the Gate's certificate from CT $GATE to check who answers on $GATE_IP"
 else
-  out=$(GATE_URL="https://$GATE_IP" ADMIN_KEY="$ADMIN_KEY" python3 - <<'PY'
-import base64, hashlib, hmac, json, os, ssl, time, urllib.request, urllib.error
+  # SECURITY: the admin key goes only to a server presenting the exact
+  # certificate installed in the Gate's container, checked on every
+  # connection. Hostname checks wouldn't work against an IP address, and
+  # not checking at all would hand the key to anyone answering on GATE_IP.
+  out=$(GATE_IP="$GATE_IP" CERT_PIN="$pin" ADMIN_KEY="$ADMIN_KEY" python3 - <<'PY'
+import base64, hashlib, hmac, http.client, json, os, ssl, time
 
-base, admin = os.environ["GATE_URL"], os.environ["ADMIN_KEY"]
+host, pin, admin = os.environ["GATE_IP"], os.environ["CERT_PIN"], os.environ["ADMIN_KEY"]
 ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+ctx.minimum_version = ssl.TLSVersion.TLSv1_3
 
 def call(method, path, body=None, headers=None):
     h = {"Content-Type": "application/json", "Accept": "application/json", **(headers or {})}
-    req = urllib.request.Request(base + path, method=method, headers=h,
-                                 data=json.dumps(body).encode() if body is not None else None)
+    conn = http.client.HTTPSConnection(host, 443, context=ctx, timeout=15)
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=15) as r:
-            return r.status, r.read().decode(), dict(r.headers)
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode(), dict(e.headers)
-    except (urllib.error.URLError, OSError) as e:
-        print(f"FAIL Can't connect to {base}: {getattr(e, 'reason', e)}")
+        conn.connect()
+        if hashlib.sha256(conn.sock.getpeercert(binary_form=True)).hexdigest() != pin:
+            print(f"FAIL {host}:443 presented a different certificate from the one installed in the Gate. Nothing was sent.")
+            raise SystemExit
+        conn.request(method, path, body=json.dumps(body).encode() if body is not None else None, headers=h)
+        r = conn.getresponse()
+        return r.status, r.read().decode(), dict(r.getheaders())
+    except OSError as e:
+        print(f"FAIL Can't connect to {host}: {e}")
         raise SystemExit
+    finally:
+        conn.close()
 
 def say(ok, msg):
     print(("PASS " if ok else "FAIL ") + msg)

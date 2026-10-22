@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Threading;
+using System.Threading.Tasks;
 using Jellyfin.Plugin.LanternfishGate.Configuration;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Plugins;
@@ -12,6 +14,10 @@ namespace Jellyfin.Plugin.LanternfishGate;
 /// <summary>Only accept requests that Lanternfish Gate forwarded and signed.</summary>
 public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 {
+    // SECURITY (L4): one replay cache for the plugin's life. A settings
+    // save builds a new verifier, and a fresh cache would let a request seen
+    // just before the save be replayed just after it.
+    private readonly ReplayCache _replayCache = new();
     private volatile GatePolicy _policy;
 
     /// <summary>Initializes a new instance of the <see cref="Plugin"/> class.</summary>
@@ -20,8 +26,8 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public Plugin(IApplicationPaths applicationPaths, IXmlSerializer xmlSerializer)
         : base(applicationPaths, xmlSerializer)
     {
-        _policy = GatePolicy.From(Configuration);
-        ConfigurationChanged += (_, _) => _policy = GatePolicy.From(Configuration);
+        _policy = GatePolicy.From(Configuration, _replayCache);
+        ConfigurationChanged += (_, _) => Replace(GatePolicy.From(Configuration, _replayCache));
         Instance = this;
     }
 
@@ -39,6 +45,18 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 
     /// <summary>Gets the policy for the current configuration.</summary>
     public GatePolicy Policy => _policy;
+
+    // Swaps in a new policy and disposes the old verifier's keys once
+    // requests that already picked it up are done with it (verification is
+    // synchronous, so a minute is ample).
+    private void Replace(GatePolicy next)
+    {
+        var old = Interlocked.Exchange(ref _policy, next);
+        if (old.Verifier is { } verifier)
+        {
+            _ = Task.Delay(TimeSpan.FromMinutes(1)).ContinueWith(_ => verifier.Dispose(), TaskScheduler.Default);
+        }
+    }
 
     /// <inheritdoc />
     public IEnumerable<PluginPageInfo> GetPages() =>

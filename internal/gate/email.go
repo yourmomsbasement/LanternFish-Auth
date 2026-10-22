@@ -227,6 +227,7 @@ func (g *Gate) inviteEmail(w http.ResponseWriter, r *http.Request, k *AdminKey) 
 	if c.SubjectID == "" {
 		c.SubjectID = defaultSubjectID
 	}
+	var missing string
 	err := g.store.Update(func(d *storeData) error {
 		if retry != nil {
 			old := d.Claims[retry.ID]
@@ -235,11 +236,15 @@ func (g *Gate) inviteEmail(w http.ResponseWriter, r *http.Request, k *AdminKey) 
 			}
 			old.Revoked = true
 		}
-		if owner := d.Subjects[c.SubjectID]; owner == nil || owner.Status != "active" {
+		owner := d.Subjects[c.SubjectID]
+		if owner == nil || owner.Status != "active" {
 			return errors.New("invalid owner")
 		}
 		if c.ProfileID != "" && d.Profiles[c.ProfileID] == nil {
 			return errors.New("invalid profile")
+		}
+		if missing = enrollmentScopeNeeded(k, owner, c.ProfileID); missing != "" {
+			return &scopeError{missing}
 		}
 		if d.Claims == nil {
 			d.Claims = map[string]*EnrollmentClaim{}
@@ -255,6 +260,11 @@ func (g *Gate) inviteEmail(w http.ResponseWriter, r *http.Request, k *AdminKey) 
 		d.Claims[c.ID] = c
 		return nil
 	})
+	if err != nil && missing != "" {
+		g.releaseMail()
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "scope_required", "scope": missing})
+		return
+	}
 	if err != nil {
 		g.releaseMail()
 		writeError(w, 400, "could not create invitation; check owner and profile")

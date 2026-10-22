@@ -5,6 +5,13 @@
 enable: 1
 policy_in: DROP
 policy_out: ACCEPT
+# SECURITY: Jellyfin may only send from its own address, so if it is
+# compromised it can't pose as the Gate (10.20.0.2) to other containers.
+# Every container on vmbr1 needs these lines, with its own address.
+ipfilter: 1
+
+[IPSET ipfilter-net0]
+10.20.0.3
 
 [RULES]
 IN ACCEPT -source 10.20.0.2 -p tcp -dport 8096 -log nolog # only the Gate may talk to Jellyfin

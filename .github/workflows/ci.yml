@@ -14,21 +14,21 @@ jobs:
     name: Dashboard browser rendering
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
       - name: Install browser test runtime
         run: |
-          npm install --prefix /tmp/lanternfish-browser --no-save --package-lock=false playwright@1.62.1
-          node /tmp/lanternfish-browser/node_modules/playwright/cli.js install --with-deps chromium firefox
+          npm ci --prefix scripts/browser-test --ignore-scripts
+          node scripts/browser-test/node_modules/playwright/cli.js install --with-deps chromium firefox
       - name: Render Tickets and Email with mocked APIs
         env:
-          NODE_PATH: /tmp/lanternfish-browser/node_modules
+          NODE_PATH: ${{ github.workspace }}/scripts/browser-test/node_modules
         run: node scripts/test-admin-render.cjs
       - name: Query cache upgrades (Chromium and Firefox)
         env:
-          NODE_PATH: /tmp/lanternfish-browser/node_modules
+          NODE_PATH: ${{ github.workspace }}/scripts/browser-test/node_modules
         run: |
           node scripts/test-jellyfin-cache.cjs
           BROWSER=firefox node scripts/test-jellyfin-cache.cjs
@@ -37,8 +37,8 @@ jobs:
     name: Gate (Go)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: gofmt
@@ -65,8 +65,8 @@ jobs:
     name: Jellyfin plugin (.NET)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 10.0.x
       - name: dotnet test
@@ -76,7 +76,7 @@ jobs:
     name: Deploy scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: shellcheck
         run: shellcheck deploy/systemd/*.sh deploy/systemd/lanternfish-gatectl deploy/proxmox/verify.sh deploy/proxmox/guarded-firewall*.sh
       - name: Guarded firewall tests (mock host commands)

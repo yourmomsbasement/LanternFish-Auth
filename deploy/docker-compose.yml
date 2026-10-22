@@ -9,7 +9,8 @@
 #   mkdir -p secrets
 #   docker run --rm lanternfish-gate gen-master-key > secrets/master_key
 #   chmod 600 secrets/master_key
-# Then put your TLS certificate (full chain) and key in ./certs.
+# Then put your TLS certificate (full chain) and key in ./certs (ignored by
+# git and Docker builds; keep it that way).
 
 services:
   gate:
@@ -18,6 +19,9 @@ services:
     restart: unless-stopped
     ports:
       - "443:8443"
+      # The admin dashboard (LANTERNFISH_ADMIN_LISTEN below). Don't forward
+      # this port on your router; better, bind it to a LAN address only.
+      - "9443:9443"
     environment:
       LANTERNFISH_UPSTREAM: http://jellyfin:8096
       LANTERNFISH_MASTER_KEY_FILE: /run/secrets/master_key
@@ -29,6 +33,10 @@ services:
       # example, for IPv6 or hairpin traffic) makes outside clients appear to
       # come from the bridge gateway (172.x), which is one of them.
       # LANTERNFISH_ADMIN_ALLOW: 192.168.1.10
+      # SECURITY: the dashboard on its own origin, away from Jellyfin's
+      # scripts. Publish it only on an address your admin PC reaches, e.g.
+      # "192.168.1.5:9443:9443" under ports.
+      LANTERNFISH_ADMIN_LISTEN: ":9443"
     secrets:
       - master_key
     volumes:
@@ -38,7 +46,10 @@ services:
       - jellyfin
 
   jellyfin:
-    image: jellyfin/jellyfin:latest
+    # Pinned (tag and digest): the plugin is built against Jellyfin 12.2, and
+    # an unpinned image can change under it. Update both together, then
+    # rerun the checks in deploy/proxmox/README.md ("Verify").
+    image: jellyfin/jellyfin:12.2.20261005-225228@sha256:357724bf0ae27a672c7cbaa899db2d9abeb13dbd8657ccce750258a4c059d037
     restart: unless-stopped
     # No "ports:" here, on purpose.
     volumes:

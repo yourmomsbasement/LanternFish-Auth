@@ -143,6 +143,11 @@ Set-Cookie: lf_session=lfs_…; Path=/; Secure; HttpOnly; SameSite=Lax
 
 * A challenge is bound to the `device_id` it was issued for. It is deleted the
   first time anyone tries to use it, whether that attempt succeeds or fails.
+* It must be answered from the source it was issued to (an IPv4 address, or
+  an IPv6 /64). Ask for the challenge and sign in over the same network.
+* A challenge requested by the Gate's own sign-in page (`Sec-Fetch-Site:
+  same-origin`) can only be used for a browser session (`"client":
+  "browser"`), not exchanged for a native client's bearer token.
 * The Gate issues challenges for unknown device IDs as well, so this endpoint
   cannot be used to find out which devices exist.
 * Each source (an IPv4 address, or an IPv6 /64) may hold at most 32

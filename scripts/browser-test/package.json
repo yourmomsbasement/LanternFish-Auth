@@ -1,0 +1,8 @@
+{
+  "name": "lanternfish-browser-tests",
+  "private": true,
+  "description": "Pinned runtime for scripts/test-*.cjs (CI installs it with npm ci).",
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}

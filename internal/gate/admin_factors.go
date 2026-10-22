@@ -15,7 +15,7 @@ func (g *Gate) adminFactorRoutes(mux *http.ServeMux) {
 	const p = "/_lanternfish/admin/v2/"
 	mux.HandleFunc("POST "+adminPath+"/verify", g.admin(scopeAny, g.handleAdminVerify))
 	mux.HandleFunc("POST "+adminPath+"/link", g.admin(scopeAny, g.handleAdminLink))
-	mux.HandleFunc("GET "+p+"admin-keys", g.admin(scopeAny, g.handleListAdminKeys))
+	mux.HandleFunc("GET "+p+"admin-keys", g.admin(scopeOwners, g.handleListAdminKeys))
 	mux.HandleFunc("GET "+p+"status", g.admin(scopePolicyRead, g.handleDeploymentStatus))
 
 	mux.HandleFunc("GET "+p+"subjects/{id}/factors", g.admin(scopeDevices, g.handleSubjectFactors))

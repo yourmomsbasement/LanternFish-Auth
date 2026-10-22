@@ -2,7 +2,7 @@ module github.com/yourmomsbasement/lanternfish-auth
 
 // The go line pins the exact toolchain releases are built with (setup-go and
 // the Dockerfile follow it). Keep it on a supported, patched Go release.
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.4

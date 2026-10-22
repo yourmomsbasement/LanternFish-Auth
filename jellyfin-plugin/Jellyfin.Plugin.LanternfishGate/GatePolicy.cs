@@ -19,8 +19,9 @@ public sealed class GatePolicy
 
     /// <summary>Builds the policy for a configuration.</summary>
     /// <param name="config">The plugin configuration.</param>
+    /// <param name="replayCache">The replay cache to keep across configurations; null for a new one.</param>
     /// <returns>The policy.</returns>
-    public static GatePolicy From(Configuration.PluginConfiguration config)
+    public static GatePolicy From(Configuration.PluginConfiguration config, ReplayCache? replayCache = null)
     {
         var keys = config.GatePublicKeys.Split(['\n', '\r', ',', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (keys.Length == 0)
@@ -33,7 +34,7 @@ public sealed class GatePolicy
             var skew = TimeSpan.FromSeconds(Math.Clamp(config.MaxClockSkewSeconds, 5, 300));
             return new GatePolicy
             {
-                Verifier = new GateSignatureVerifier(keys, skew),
+                Verifier = new GateSignatureVerifier(keys, skew, cache: replayCache),
                 AllowLoopbackHealthCheck = config.AllowLoopbackHealthCheck,
                 InjectSessionRenewal = config.InjectSessionRenewal,
             };
